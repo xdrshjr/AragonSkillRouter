@@ -1,0 +1,29 @@
+import { defineConfig, devices } from '@playwright/test';
+
+/**
+ * Playwright 配置（e2e 可能需要真实后端，默认不随 CI 必跑）。
+ * 用 `npm run test:e2e` 手动执行；缺少后端时测试会自行 skip。
+ */
+export default defineConfig({
+  testDir: './e2e',
+  timeout: 60_000,
+  expect: { timeout: 10_000 },
+  fullyParallel: false,
+  retries: process.env.CI ? 1 : 0,
+  reporter: process.env.CI ? 'github' : 'list',
+  use: {
+    baseURL: process.env.SR_BASE_URL ?? 'http://127.0.0.1:3000',
+    trace: 'on-first-retry',
+    locale: 'zh-CN',
+    timezoneId: 'Asia/Shanghai',
+  },
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  webServer: process.env.SR_BASE_URL
+    ? undefined
+    : {
+        command: 'npm run start',
+        url: 'http://127.0.0.1:3000/api/health',
+        reuseExistingServer: true,
+        timeout: 120_000,
+      },
+});

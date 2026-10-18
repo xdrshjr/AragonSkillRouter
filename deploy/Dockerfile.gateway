@@ -1,0 +1,57 @@
+# Skill Router Agent 网关镜像（spec §4.2 / §8.3 / §14.2）
+#
+# 为什么两阶段：`typescript` 在 devDependencies 里，单阶段 `npm ci --omit=dev && tsc`
+# 永远构建不出来（这正是 §12.4 记录过的同类错误）。因此运行镜像只含 `dist/` + 运行时依赖，
+# 不带编译器、测试与 devDependencies。
+#
+# 构建上下文是**仓库根目录**（compose 里 `context: ..`），所有 COPY 带 `agents/aragon-gateway/` 前缀。
+#
+# ── 生产前必做 ──────────────────────────────────────────────────────────────
+# 固定基础镜像 digest：--build-arg NODE_BASE=node:22-slim@sha256:<fill-me>
+# 引擎版本由 `agents/aragon-gateway/package.json` 的 `@aragon-agent/core` 精确 pin 决定
+# （当前 0.2.34，不允许 `^`）；升级走 §12.4 流水线，不要在这里改。
+
+ARG NODE_BASE=node:22-slim
+
+# ── 构建层 ─────────────────────────────────────────────────────────────────
+FROM ${NODE_BASE} AS build
+WORKDIR /app
+# 宿主环境若带 NODE_ENV=production，npm 会跳过 devDependencies（本机实测踩过），
+# 这里显式固定为 development 并 --include=dev。
+ENV NODE_ENV=development
+COPY agents/aragon-gateway/package.json agents/aragon-gateway/package-lock.json ./
+RUN npm ci --include=dev --no-audit --no-fund
+COPY agents/aragon-gateway/tsconfig.json ./
+COPY agents/aragon-gateway/src ./src
+RUN npx tsc -p tsconfig.json
+
+# ── 运行层 ─────────────────────────────────────────────────────────────────
+FROM ${NODE_BASE}
+
+ENV NODE_ENV=production \
+    AGENT_GATEWAY_BIND=127.0.0.1 \
+    AGENT_GATEWAY_PORT=8500 \
+    AGENT_GATEWAY_ENGINE_MODE=host \
+    AGENT_POLICY_PATH=/data/agent-policy.json \
+    AGENT_ENGINE_HOME_ROOT=/data/aragon-home/engines \
+    AGENT_SESSION_DIR=/data/agent-sessions
+
+WORKDIR /app
+COPY agents/aragon-gateway/package.json agents/aragon-gateway/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund \
+    && npm cache clean --force
+COPY --from=build /app/dist ./dist
+
+# 非 root（node 用户 uid/gid = 1000），与 api/web 统一，共享 /data 卷才不会互相写不进去。
+# 网关只会写 /data：策略文件、按版本隔离的引擎 home、会话缓存。
+RUN mkdir -p /data/aragon-home/engines /data/agent-sessions \
+    && chown -R 1000:1000 /data /app
+
+USER 1000:1000
+EXPOSE 8500
+
+# /healthz 无需鉴权（回环/内网可达，响应体不含任何密钥），`ok:false` 表示引擎不可用 → 探针失败。
+HEALTHCHECK --interval=20s --timeout=6s --start-period=90s --retries=5 \
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.AGENT_GATEWAY_PORT||8500)+'/healthz').then(r=>r.json()).then(j=>process.exit(j.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "dist/src/main.js"]

@@ -1,0 +1,58 @@
+# Skill Router 管理控制台镜像（spec §8.4 / §14.2）
+#
+# 构建上下文是**仓库根目录**（compose 里 `context: ..`），因此所有 COPY 都带 `apps/web/` 前缀。
+# Next.js 用 `output: 'standalone'`（apps/web/next.config.mjs），运行时只需要
+# `.next/standalone` + `.next/static` + `public`，镜像里没有 node_modules 全量依赖。
+#
+# ── 生产前必做 ──────────────────────────────────────────────────────────────
+# 固定基础镜像 digest：--build-arg NODE_BASE=node:22-slim@sha256:<fill-me>
+# 或者直接把下面的 ARG 默认值替换掉。
+
+ARG NODE_BASE=node:22-slim
+
+# ── 依赖层 ─────────────────────────────────────────────────────────────────
+FROM ${NODE_BASE} AS deps
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NODE_ENV=development
+# 注意：宿主机若设了 NODE_ENV=production，npm ci 会跳过 devDependencies 导致
+# typescript/tailwind 缺失；这里显式 --include=dev 并把 NODE_ENV 固定为 development。
+COPY apps/web/package.json apps/web/package-lock.json ./
+RUN if [ -f package-lock.json ]; then \
+      npm ci --include=dev --no-audit --no-fund; \
+    else \
+      npm install --include=dev --no-audit --no-fund; \
+    fi
+
+# ── 构建层 ─────────────────────────────────────────────────────────────────
+FROM ${NODE_BASE} AS builder
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NODE_ENV=production
+COPY --from=deps /app/node_modules ./node_modules
+COPY apps/web/ ./
+# 仓库里可能没有 public/ 目录：先兜底创建，避免 COPY 失败
+RUN mkdir -p public
+# 构建期不需要真实后端：rewrites 只在运行时求值（SKILLROUTER_API_URL）
+RUN npm run build
+
+# ── 运行层 ─────────────────────────────────────────────────────────────────
+FROM ${NODE_BASE} AS runner
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+# 复用 node 镜像自带的用户（uid/gid = 1000），与 api/gateway 保持一致
+COPY --from=builder --chown=1000:1000 /app/.next/standalone ./
+COPY --from=builder --chown=1000:1000 /app/.next/static ./.next/static
+COPY --from=builder --chown=1000:1000 /app/public ./public
+
+USER 1000:1000
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "server.js"]

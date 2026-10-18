@@ -1,0 +1,66 @@
+# Skill Router api/worker 镜像（spec §4.2 / §14.2）
+#
+# 一个镜像两个入口：`api`（uvicorn + FastAPI）与 `worker`（python -m skillrouter_api.worker），
+# 由 CMD/command 区分（§4.2「api 与 worker 共用同一 Docker 镜像不同入口命令」）。
+#
+# ── 生产前必做 ──────────────────────────────────────────────────────────────
+# 把基础镜像固定到 digest（§14.2）。两种写法都行：
+#   docker build --build-arg PY_BASE=python:3.11-slim@sha256:<fill-me> ...
+#   或直接把下面的 ARG 默认值改成带 digest 的形式。
+# 依赖清单由后端 owner 维护：apps/api/requirements.txt（运行时，全部 == 精确锁定）。
+#
+# 为什么不在镜像里装 sqlite3 CLI / tar：备份恢复是纯标准库实现（scripts/backup.py /
+# restore.py，§7.4 v2），运行镜像不需要任何外部数据库二进制，也就不需要它们。
+
+ARG PY_BASE=python:3.11-slim
+FROM ${PY_BASE}
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app \
+    SKILLROUTER_DATA_DIR=/data \
+    SKILLROUTER_DB_PATH=/data/skillrouter.db
+
+WORKDIR /app
+
+# ca-certificates：访问上游 HTTPS 端点（httpx 自带 certifi，这里只是兜底）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 依赖层单独缓存：只改代码时不会重装依赖
+COPY apps/api/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# 应用代码（含 migrations/alembic.ini 与 tests）
+COPY apps/api/ /app/
+
+# 运维脚本（备份/恢复/性能/演示数据/主密钥轮换）
+COPY scripts/ /app/scripts/
+
+# 说明：仓库根的 `db/migrations/0001_init.sql` 是「与 Alembic 对齐的可审阅 SQL 快照」（§10.3），
+# 属于审阅物、不是运行期依赖，因此**不进镜像**（也避免它在尚未提交时打断构建）。
+# 运行期迁移只用 `apps/api/migrations/alembic.ini`（已随 `COPY apps/api/` 一起进镜像）。
+
+# 入口脚本：CRLF → LF（Windows 检出后 bash 会因 \r 报 "no such file or directory"）
+COPY deploy/entrypoint.api.sh /app/deploy/entrypoint.api.sh
+RUN sed -i 's/\r$//' /app/deploy/entrypoint.api.sh && chmod +x /app/deploy/entrypoint.api.sh
+
+# 非 root，且与 gateway/web 统一 uid:gid = 1000:1000（共享 /data 卷要求，见 compose 注释）
+RUN groupadd --gid 1000 app \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash app \
+    && mkdir -p /data \
+    && chown -R 1000:1000 /data /app
+
+USER 1000:1000
+
+EXPOSE 8000
+
+# slim 镜像没有 curl，一律用 python 做健康检查（compose 里另有等价定义）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 \
+    CMD python -c "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3).status==200 else 1)"
+
+ENTRYPOINT ["/app/deploy/entrypoint.api.sh"]
+CMD ["api"]

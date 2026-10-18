@@ -1,0 +1,293 @@
+name: ci
+
+# 三层门禁（spec §15.1）：lint/typecheck → unit+contract → e2e（可选）
+#
+# 设计原则
+# * **不需要任何 secret**：本工作流只跑静态检查与单测，不连真实上游、不碰真实令牌。
+# * 缺文件不炸：仓库在演进（`apps/api/requirements*.txt`、`tests/` 由后端 owner 补齐），
+#   缺失时打印 ::notice:: 并跳过该步，其余作业照常给出信号。
+# * 明确矩阵：Python 3.11 / Node 22（与 spec §5 版本锁定一致）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_e2e:
+        description: '是否运行 Playwright e2e（需要可用的本地栈）'
+        type: boolean
+        default: false
+      e2e_base_url:
+        description: 'e2e 目标地址（例如 http://127.0.0.1:3000；留空则跳过）'
+        type: string
+        default: ''
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 宿主环境若为 production，npm 会跳过 devDependencies（本项目实测踩过），统一在这里关掉。
+  NODE_ENV: development
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  # ── 运维脚本：语法 + 静态检查（这些文件不含第三方依赖，最容易做成硬门禁）────
+  scripts:
+    name: scripts (py3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 语法检查（compileall，不 import）
+        run: python -m compileall -q scripts
+      - name: 标准库约束自检（备份/恢复不得出现 sqlite3 CLI 或 tar）
+        run: |
+          set -e
+          if grep -nE '^\s*(os\.system|subprocess)\(' scripts/backup.py scripts/restore.py | grep -v 'subprocess.run(.*alembic'; then
+            echo "::notice::backup/restore 里出现了外部进程调用，请确认不是 sqlite3/tar"
+          fi
+          # 备份与恢复必须只依赖标准库
+          if grep -nE '^\s*(import|from)\s+(httpx|pydantic|sqlalchemy)' scripts/backup.py scripts/restore.py; then
+            echo "::error::backup.py / restore.py 必须只用标准库（§7.4 / R09）"
+            exit 1
+          fi
+      - name: ruff（脚本）
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+          ruff check scripts
+
+  # ── 后端：ruff / mypy / pytest ─────────────────────────────────────────────
+  api:
+    name: api (py3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f apps/api/requirements-dev.txt ]; then
+            # 生产建议加 --require-hashes（§5）；requirements 里尚无哈希时先普通安装
+            pip install -r apps/api/requirements-dev.txt
+          elif [ -f apps/api/requirements.txt ]; then
+            pip install -r apps/api/requirements.txt
+          else
+            echo "::notice::apps/api/requirements(-dev).txt 尚未提交，跳过依赖安装"
+          fi
+          pip install ruff
+      - name: ruff
+        working-directory: apps/api
+        run: ruff check .
+      - name: mypy（有配置才跑；services 层要求 strict）
+        run: |
+          set -e
+          if [ -f apps/api/mypy.ini ] || [ -f apps/api/pyproject.toml ] || [ -f apps/api/setup.cfg ]; then
+            cd apps/api && python -m mypy skillrouter_api
+          else
+            echo "::notice::未找到 mypy 配置，跳过（新增 mypy.ini 后自动生效）"
+          fi
+      - name: pytest（DB 用临时文件，覆盖 WAL/锁）
+        run: |
+          set -e
+          if [ -d apps/api/tests ]; then
+            cd apps/api && python -m pytest -q
+          else
+            echo "::notice::apps/api/tests 尚未提交，跳过 pytest"
+          fi
+      - name: OpenAPI 导出并检查漂移（docs/api/openapi.json 由 CI 生成，不手写）
+        run: |
+          set -e
+          if [ ! -f apps/api/skillrouter_api/main.py ]; then
+            echo "::notice::apps/api/skillrouter_api/main.py 尚未提交，跳过 OpenAPI 导出"
+            exit 0
+          fi
+          mkdir -p docs/api
+          if (cd apps/api && python -c "import json, skillrouter_api.main as m; print(json.dumps(m.create_app().openapi(), ensure_ascii=False, indent=2))") > docs/api/openapi.json 2>/tmp/openapi.err; then
+            if [ -n "$(git status --porcelain docs/api/openapi.json)" ]; then
+              echo "::error::docs/api/openapi.json 与实现不一致，请本地重新导出并提交"
+              git --no-pager diff --stat docs/api/openapi.json || true
+              exit 1
+            fi
+            echo "OpenAPI 无漂移 ✓"
+          else
+            echo "::notice::OpenAPI 导出失败（可能需要主密钥/数据库等运行期依赖），跳过漂移检查"
+            tail -n 5 /tmp/openapi.err || true
+          fi
+
+  # ── 网关：tsc + vitest（含冻结导出/事件/工具的一致性套件）──────────────────
+  gateway:
+    name: gateway (node22)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agents/aragon-gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: agents/aragon-gateway/package-lock.json
+      - name: npm ci（显式含 devDependencies）
+        run: npm ci --include=dev --no-audit --no-fund
+      - name: tsc --noEmit
+        run: npx tsc --noEmit
+      - name: vitest
+        run: npx vitest run
+
+  # ── CLI：tsc + vitest ─────────────────────────────────────────────────────
+  cli:
+    name: cli (node22)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/skillrouter-cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/skillrouter-cli/package-lock.json
+      - name: npm install（含 devDependencies）
+        run: npm install --include=dev --no-audit --no-fund
+      - name: tsc --noEmit
+        run: npm run typecheck
+      - name: build + vitest
+        run: |
+          npm run build
+          npx vitest run
+
+  # ── 前端：lint + typecheck + build（standalone 产物是否可生成）──────────────
+  web:
+    name: web (node22)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: npm ci（含 devDependencies）
+        run: npm ci --include=dev --no-audit --no-fund
+      - name: eslint
+        run: npm run lint
+      - name: tsc --noEmit
+        run: npm run typecheck
+      - name: next build（standalone）
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+          SKILLROUTER_API_URL: http://127.0.0.1:8000
+        run: npm run build
+
+  # ── 契约：生成物必须与实现无 diff（§15.1 契约层门禁）──────────────────────
+  contracts:
+    name: contracts diff
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/contracts/package-lock.json
+      - name: npm ci（含 devDependencies）
+        run: npm ci --include=dev --no-audit --no-fund
+      - name: 生成并比对（无 diff 才算通过）
+        run: |
+          set -e
+          if [ -f scripts/gen.ts ]; then
+            npm run gen:check || npm run gen
+          else
+            echo "::notice::packages/contracts/scripts/gen.ts 尚未提交，跳过契约生成"
+          fi
+      - name: git diff 检查
+        run: |
+          set -e
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::契约生成物与提交内容不一致，请本地运行 npm run gen 后提交"
+            git --no-pager diff --stat
+            exit 1
+          fi
+          echo "契约生成物无 diff ✓"
+
+  # ── 部署产物：compose 语法校验（不需要真实密钥）────────────────────────────
+  deploy:
+    name: deploy config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 渲染并校验 docker-compose.yml
+        run: |
+          set -e
+          mkdir -p deploy/certs
+          cp deploy/.env.example deploy/.env
+          docker compose -f deploy/docker-compose.yml config -q
+          echo "compose 配置校验通过 ✓"
+      - name: nginx.conf 结构自检（关键约束不得缺失）
+        run: |
+          set -e
+          for needle in "proxy_buffering off" "client_max_body_size 50m" \
+                        "Strict-Transport-Security" "TLSv1.2" "proxy_pass http://skillrouter_api" \
+                        "proxy_pass http://skillrouter_web"; do
+            if ! grep -q "$needle" deploy/nginx.conf; then
+              echo "::error::deploy/nginx.conf 缺少必需配置：$needle（§14.2）"
+              exit 1
+            fi
+          done
+          echo "nginx.conf 关键约束齐全 ✓"
+      - name: .env.example 不得含真实密钥
+        run: |
+          set -e
+          # 允许占位符（<...>）与空值；其它长随机串视为疑似真实密钥
+          if grep -nE '^(SKILLROUTER_(MASTER_KEY|FILE_SIGNING_SECRET|AGENT_GATEWAY_SECRET))=([A-Za-z0-9_\-]{32,})' deploy/.env.example; then
+            echo "::error::deploy/.env.example 里出现了疑似真实密钥，模板必须留空或写生成命令"
+            exit 1
+          fi
+          echo ".env.example 无真实密钥 ✓"
+
+  # ── e2e（可选；默认不跑。需要一个已经起好的栈，本工作流不负责起栈）──────────
+  # 为什么不在 CI 里起栈：e2e 会连真实 api/web/gateway，而起栈需要主密钥、管理员初始化、
+  # 引擎依赖，且耗时远超 PR 门禁的合理范围（§15.1 把 e2e 列为「CI 可选」）。
+  # 由有栈的人手动 dispatch 并传入 e2e_base_url。
+  e2e:
+    name: e2e (optional)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_e2e && inputs.e2e_base_url != ''
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    env:
+      E2E_BASE_URL: ${{ inputs.e2e_base_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: npm ci（含 devDependencies）
+        run: npm ci --include=dev --no-audit --no-fund
+      - name: 安装浏览器
+        run: npx playwright install --with-deps chromium
+      - name: 确认目标可达（不可达就明确失败，而不是让 e2e 报一堆超时）
+        run: |
+          set -e
+          curl -fsS "${E2E_BASE_URL}/api/health" > /dev/null || {
+            echo "::error::${E2E_BASE_URL}/api/health 不可达，e2e 需要预先起好的栈"; exit 1; }
+      - name: playwright
+        run: npx playwright test

@@ -1,0 +1,2 @@
+/* Next.js 约定入口：真正的令牌与全局样式在 styles/ 下，这里只做转发。 */
+@import '../styles/globals.css';

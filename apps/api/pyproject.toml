@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skillrouter-api"
+version = "0.1.0"
+description = "Skill Router 平台后端（FastAPI）"
+requires-python = ">=3.11"
+requires-python-note = "见 requirements.txt 的精确锁定"
+
+[project.optional-dependencies]
+dev = []
+
+[tool.setuptools]
+packages = ["skillrouter_api"]
+package-dir = { "skillrouter_api" = "skillrouter_api" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ANN001", "ANN201"]
+ignore = ["ANN401", "B008", "E501", "UP038"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN001", "ANN201", "E402"]
+"migrations/**" = ["ANN001", "ANN201"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+ignore_missing_imports = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+exclude = ["tests/", "migrations/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+  "slow: 性能基线测试",
+  "e2e: 端到端测试",
+  "contract: 接口契约测试",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+asyncio_mode = "auto"

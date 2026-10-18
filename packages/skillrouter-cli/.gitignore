@@ -1,0 +1,11 @@
+# build output
+dist/
+node_modules/
+
+# local test/scratch output
+*.tsbuildinfo
+.tmp/
+coverage/
+
+# installed artifacts produced by `skillrouter install` in this folder
+skillrouter-skill/

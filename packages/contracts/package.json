@@ -1,0 +1,31 @@
+{
+  "name": "@skillrouter/contracts",
+  "version": "0.1.0",
+  "description": "Skill Router 对外接口（/api/v1）的 TypeScript 类型契约",
+  "license": "proprietary",
+  "type": "module",
+  "types": "./src/api.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/api.d.ts",
+      "default": "./src/api.d.ts"
+    }
+  },
+  "files": [
+    "src/api.d.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "gen": "node --experimental-strip-types scripts/gen.ts",
+    "gen:check": "node --experimental-strip-types scripts/gen.ts --check",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "openapi-typescript": "^7.4.4",
+    "typescript": "^5.6.3"
+  }
+}

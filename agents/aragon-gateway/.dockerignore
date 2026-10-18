@@ -1,0 +1,26 @@
+# Build context for the gateway image (see Dockerfile).
+node_modules
+dist
+test
+var
+coverage
+*.log
+*.tgz
+npm-debug.log*
+
+# Local secrets / env
+.env
+.env.*
+!.env.example
+
+# Docs and editor droppings are not needed to build the image.
+README.md
+*.md
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Dockerfile itself, to keep the layer cache key stable.
+Dockerfile
+.dockerignore

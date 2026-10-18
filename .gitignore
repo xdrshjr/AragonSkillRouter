@@ -1,0 +1,47 @@
+# runtime data
+var/
+*.db
+*.db-wal
+*.db-shm
+backup/
+logs/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# node
+node_modules/
+.next/
+out/
+dist/
+*.tgz
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# env & secrets
+.env
+.env.local
+credentials-master.key
+credentials.json
+file-signing.key
+
+# deploy scratch
+deploy/.env
+deploy/certs/
+
+# agent orchestration harness（任务提示/报告/黑板属于运行时数据，不进仓库）
+.agentmesh/
+
+# editors / os
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

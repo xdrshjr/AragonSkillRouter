@@ -1,0 +1,30 @@
+{
+  "name": "@skillrouter/cli",
+  "version": "0.1.0",
+  "description": "Skill Router 安装器 CLI：把一个已发布的 SKILL 接入外部 Agent（AragonAgent / Claude Code / 通用目录）",
+  "license": "proprietary",
+  "type": "module",
+  "bin": {
+    "skillrouter": "dist/cli.js"
+  },
+  "main": "dist/cli.js",
+  "files": [
+    "dist",
+    "src/templates",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.4"
+  }
+}

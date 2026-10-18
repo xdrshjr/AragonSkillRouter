@@ -1,0 +1,103 @@
+/*
+ * 设计令牌（spec §13.4）。
+ * 暖中性底色 + 赤陶橙主色；1px 边框表达层级，不使用阴影/渐变/玻璃拟态。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* 中性色阶 */
+  --sr-bg: #fbfbfa;
+  --sr-surface: #ffffff;
+  --sr-surface-sunken: #f6f5f2;
+  --sr-hover: #f4f2ee;
+  --sr-border: #e6e3dd;
+  --sr-border-strong: #d6d2ca;
+  --sr-text: #1c1a17;
+  --sr-text-muted: #6b6660;
+
+  /* 语义色 */
+  --sr-accent: #b4532a;
+  --sr-accent-weak: #f7ede7;
+  --sr-ok: #2f6f4f;
+  --sr-ok-weak: #eaf2ed;
+  --sr-warn: #a56a12;
+  --sr-warn-weak: #f8f0e0;
+  --sr-danger: #a3322b;
+  --sr-danger-weak: #f8ecea;
+  --sr-info: #2b5d8a;
+  --sr-info-weak: #eaf0f6;
+
+  /* 圆角：卡片 8px、按钮/输入 6px */
+  --sr-radius: 8px;
+  --sr-radius-sm: 6px;
+
+  /* 间距七档 */
+  --sr-space-1: 4px;
+  --sr-space-2: 8px;
+  --sr-space-3: 12px;
+  --sr-space-4: 16px;
+  --sr-space-6: 24px;
+  --sr-space-8: 32px;
+  --sr-space-12: 48px;
+
+  /* 字号 */
+  --sr-fs-12: 12px;
+  --sr-fs-13: 13px;
+  --sr-fs-14: 14px;
+  --sr-fs-16: 16px;
+  --sr-fs-20: 20px;
+  --sr-fs-24: 24px;
+  --sr-fs-32: 32px;
+  --sr-line-height: 1.55;
+
+  /* 字体 */
+  --sr-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC',
+    'Helvetica Neue', Arial, sans-serif;
+  --sr-font-mono: 'SFMono-Regular', ui-monospace, 'JetBrains Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+
+  /* 焦点环：键盘焦点必须可见 */
+  --sr-focus-ring: 0 0 0 2px var(--sr-bg), 0 0 0 4px var(--sr-accent);
+
+  /* 动效 */
+  --sr-duration: 150ms;
+  --sr-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  /* 布局 */
+  --sr-sidebar-w: 240px;
+  --sr-sidebar-w-collapsed: 64px;
+  --sr-topbar-h: 56px;
+  --sr-content-safe-right: 24px;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --sr-bg: #12110f;
+  --sr-surface: #1a1917;
+  --sr-surface-sunken: #161513;
+  --sr-hover: #22201d;
+  --sr-border: #2a2825;
+  --sr-border-strong: #3a3733;
+  --sr-text: #ece9e4;
+  --sr-text-muted: #a19b92;
+
+  --sr-accent: #d9743f;
+  --sr-accent-weak: #2c1e17;
+  --sr-ok: #6fae8b;
+  --sr-ok-weak: #17251d;
+  --sr-warn: #d2a055;
+  --sr-warn-weak: #2a2114;
+  --sr-danger: #d4736c;
+  --sr-danger-weak: #2b1917;
+  --sr-info: #7fa8cf;
+  --sr-info-weak: #16202b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --sr-duration: 0ms;
+  }
+}

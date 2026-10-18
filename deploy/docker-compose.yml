@@ -1,0 +1,248 @@
+# Skill Router 生产部署（spec §4.2 / §14.2）
+#
+# 服务拓扑：proxy(443/80) → web(3000) / api(8000) → gateway(8500，仅容器网络) + worker(无端口)
+# 依赖顺序：api 先完成迁移并被健康检查通过 → gateway/worker 才启动 → web → proxy 最后
+#          （`depends_on.condition: service_healthy`，§14.2）
+#
+# ── 开工前必读 ──────────────────────────────────────────────────────────────
+# 1) **镜像 digest 固定**（§14.2）。本文件里的应用镜像用 tag，基础镜像在三个 Dockerfile 里
+#    通过 ARG 传入。生产部署前必须把 digest 填实，占位符位置如下：
+#        nginx:1.27-alpine@sha256:<fill-me>          ← 本文件 proxy 服务
+#        python:3.11-slim@sha256:<fill-me>           ← deploy/Dockerfile.api
+#        node:22-slim@sha256:<fill-me>               ← deploy/Dockerfile.web / Dockerfile.gateway
+#    获取方式：`docker buildx imagetools inspect nginx:1.27-alpine --format '{{.Manifest.Digest}}'`
+#    未固定 digest 之前，本文件只能用于本地/预发环境。
+# 2) 复制模板并生成密钥：`cp deploy/.env.example deploy/.env`，按注释生成主密钥与网关密钥。
+#    模板里**不含任何真实密钥**；真实值只写进部署机的 .env 或密钥管理服务。
+# 3) 共享卷 `/data` 由 api/worker/gateway 三个容器共同读写，因此三者固定使用同一 uid/gid
+#    （1000:1000，见三个 Dockerfile）。改用户前请一并改卷权限，否则会出现「写不进去」。
+# 4) **gateway 的网络**（§4.2 的 `AGENT_GATEWAY_BIND=127.0.0.1` 的容器化等价实现）：
+#    - 容器之间无法共用 loopback，所以网关绑定在容器 IP 上；
+#    - 它**不发布任何端口**，且只加入 `backend`（internal，web/proxy 不在其上）与 `egress`
+#      （引擎调用模型提供商必须出网），因此宿主机、局域网、proxy、web 都到不了它；
+#    - 唯一能访问它的是 api/worker，且必须带 `X-Internal-Token`
+#      （`AGENT_GATEWAY_SHARED_SECRET`，强制 ≥32 字符）。
+# 5) 网络划分：`frontend` = proxy/web/api（管理端页面与 /api）；`backend` = api/worker/gateway
+#    （internal，平台域与网关域）；`egress` = api/worker/gateway（上游 API、模型提供商）。
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  # ── FastAPI 主服务（api + worker 共用同一镜像，不同入口命令；§4.2）──────────
+  api:
+    image: skillrouter/api:${SKILLROUTER_IMAGE_TAG:-0.1.0}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    command: ["api"]
+    env_file:
+      - .env
+    environment:
+      SKILLROUTER_ENV: ${SKILLROUTER_ENV:-production}
+      SKILLROUTER_DATA_DIR: /data
+      SKILLROUTER_DB_PATH: /data/skillrouter.db
+      SKILLROUTER_AGENT_GATEWAY_URL: http://gateway:8500
+    volumes:
+      - skillrouter-data:/data
+    ports:
+      # 仅回环发布，供运维本机 curl / scripts/perf_smoke.py 使用；不需要可直接删除。
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3).status==200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # 首次启动要跑迁移 + 管理员初始化 + 启动前 quick 备份，给足 120s。
+      start_period: 120s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - frontend
+      - backend
+      - egress
+
+  # ── 队列 worker（无端口；健康判定看 worker_heartbeats.last_seen_at，§14.2）──
+  worker:
+    image: skillrouter/api:${SKILLROUTER_IMAGE_TAG:-0.1.0}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    command: ["worker"]
+    env_file:
+      - .env
+    environment:
+      SKILLROUTER_ENV: ${SKILLROUTER_ENV:-production}
+      SKILLROUTER_DATA_DIR: /data
+      SKILLROUTER_DB_PATH: /data/skillrouter.db
+      SKILLROUTER_AGENT_GATEWAY_URL: http://gateway:8500
+    volumes:
+      - skillrouter-data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import sqlite3,os,sys,datetime as dt;c=sqlite3.connect(os.environ.get('SKILLROUTER_DB_PATH','/data/skillrouter.db'),timeout=5);rows=list(c.execute('select last_seen_at from worker_heartbeats order by last_seen_at desc limit 1'));ts=rows[0][0] if rows else None;ok=ts is None or dt.datetime.fromisoformat(str(ts).replace('Z','+00:00'))>dt.datetime.now(dt.timezone.utc)-dt.timedelta(seconds=90);sys.exit(0 if ok else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - backend
+      - egress
+
+  # ── AragonAgent 网关（Node 22；引擎宿主 + sr_* 工具代理，§7.12）───────────────
+  gateway:
+    image: skillrouter/gateway:${SKILLROUTER_IMAGE_TAG:-0.1.0}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    env_file:
+      - .env
+    environment:
+      # 网关自己的变量名与平台侧 SKILLROUTER_* 不同，二者必须取同一个值。
+      AGENT_GATEWAY_SHARED_SECRET: ${SKILLROUTER_AGENT_GATEWAY_SECRET:?必须设置 SKILLROUTER_AGENT_GATEWAY_SECRET（≥32 字符）}
+      AGENT_GATEWAY_BIND: 0.0.0.0
+      # 只在 backend/egress 上可达且必须带 X-Internal-Token；
+      # 这是「仅回环」约束在容器网络下的等价实现（见文件头第 4 条）。
+      AGENT_GATEWAY_ALLOW_PUBLIC_BIND: "1"
+      AGENT_GATEWAY_PORT: "8500"
+      # host 模式才支持 §12.4 的 /internal/admin/reload 热切换（inline 模式会诚实拒绝）。
+      AGENT_GATEWAY_ENGINE_MODE: host
+      ENGINE_PIN: ${SKILLROUTER_ENGINE_PIN_VERSION:-0.2.34}
+      SKILLROUTER_INTERNAL_URL: http://api:8000
+      AGENT_POLICY_PATH: /data/agent-policy.json
+      AGENT_ENGINE_HOME_ROOT: /data/aragon-home/engines
+      AGENT_SESSION_DIR: /data/agent-sessions
+      AGENT_MODEL_PROVIDER: ${SKILLROUTER_AGENT_MODEL_PROVIDER:-anthropic}
+      AGENT_MODEL_ID: ${SKILLROUTER_AGENT_MODEL:-}
+      AGENT_MODEL_BASE_URL: ${SKILLROUTER_AGENT_MODEL_BASE_URL:-}
+    volumes:
+      - skillrouter-data:/data
+    # 不发布端口：只有 api/worker 能通过 backend 网络访问它。
+    expose:
+      - "8500"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:8500/healthz').then(r=>r.json()).then(j=>process.exit(j.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 20s
+      timeout: 6s
+      retries: 5
+      # 引擎子进程要 import @aragon-agent/core 并自报 ready，给足启动时间。
+      start_period: 90s
+    restart: unless-stopped
+    # 热切换要排空旧子进程（§7.12：60s 上限），停止宽限期必须大于它。
+    stop_grace_period: 90s
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - backend
+      - egress
+
+  # ── 管理控制台（Next.js standalone）───────────────────────────────────────
+  web:
+    image: skillrouter/web:${SKILLROUTER_IMAGE_TAG:-0.1.0}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      # next.config.mjs 的 rewrites 用 SKILLROUTER_API_URL（不带 /api 的基址）。
+      SKILLROUTER_API_URL: http://api:8000
+      SKILLROUTER_PUBLIC_BASE_URL: ${SKILLROUTER_PUBLIC_BASE_URL:-https://localhost}
+    ports:
+      - "127.0.0.1:3000:3000"  # 仅回环调试用；生产只经 proxy 暴露
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - frontend
+
+  # ── TLS 终结 / SSE 反代（§14.2：TLS1.2+、HSTS、proxy_buffering off、50m 上传）──
+  proxy:
+    # 生产请固定 digest：nginx:1.27-alpine@sha256:<fill-me>
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # 证书目录：把 fullchain.pem / privkey.pem 放到 deploy/certs/
+      - ./certs:/etc/nginx/certs:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      # 80 端口的 /healthz 在本容器内直接 200（不跳转）用于自检；其余路径 301 到 HTTPS。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - frontend
+
+volumes:
+  skillrouter-data:
+    # 生产建议改为宿主机绝对路径或外部卷，并纳入备份（§14.3「每日 cron + 异地存储」）。
+    # driver_opts:
+    #   type: none
+    #   o: bind
+    #   device: /srv/skillrouter/data
+
+networks:
+  frontend:
+  backend:
+    # internal：不提供出站/入站网关，只允许容器间通信；
+    # 需要出网的 api/worker/gateway 同时加入 egress。
+    internal: true
+  egress:
