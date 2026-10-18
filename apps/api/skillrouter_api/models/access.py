@@ -7,6 +7,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..db.base import Base, IdMixin, TimestampMixin
 
+#: 配额与记账的作用域（唯一真相来源，§A.3.4）：令牌 → Agent → 能力 → 提供商 → 全局
+SCOPE_TYPES = ("token", "agent", "capability", "provider", "global")
+
 
 class ExternalAgent(Base, IdMixin):
     __tablename__ = "external_agents"
@@ -97,6 +100,7 @@ class QuotaCounter(Base, IdMixin):
 
 
 __all__ = [
+    "SCOPE_TYPES",
     "ExternalAgent",
     "PlatformToken",
     "RateCounter",

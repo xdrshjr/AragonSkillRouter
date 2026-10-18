@@ -29,6 +29,38 @@ def parse_plan() -> list[str]:
     start = text.index("## 8. 文件 / 模块变更计划")
     end = text.index("## 9. 接口设计")
     section = text[start:end]
+    return _paths_in(section)
+
+
+def parse_iteration_plan() -> list[str | list[str]]:
+    """§A.4「迭代 2 文件 / 模块变更计划」四张表（T-40：新增文件必须同步进清单）。
+
+    四张表的「文件」列是相对路径（表头写了作用目录），必须按小节补齐前缀。
+    """
+    text = SPEC.read_text(encoding="utf-8")
+    start = text.index("### A.4 文件 / 模块变更计划")
+    end = text.index("### A.5 接口设计")
+    section = text[start:end]
+    prefixes = [
+        ("#### A.4.1", "apps/api/skillrouter_api/"),
+        ("#### A.4.2", "apps/api/tests/"),
+        ("#### A.4.3", "apps/web/"),
+        ("#### A.4.4", ""),
+    ]
+    paths: list[str] = []
+    for index, (heading, prefix) in enumerate(prefixes):
+        block_start = section.index(heading)
+        block_end = (
+            section.index(prefixes[index + 1][0]) if index + 1 < len(prefixes) else len(section)
+        )
+        for path in _paths_in(section[block_start:block_end]):
+            # 少数条目虽列在 A.4.1，但实际位于 apps/api/ 下（如 migrations/versions/*.py）
+            candidates = [path] if not prefix else [f"{prefix}{path}", f"apps/api/{path}"]
+            paths.append(path if not prefix else candidates)
+    return paths
+
+
+def _paths_in(section: str) -> list[str]:
     paths: list[str] = []
     for line in section.split("\n"):
         if not line.startswith("|"):
@@ -54,12 +86,17 @@ def parse_plan() -> list[str]:
 
 
 def main() -> int:
-    plan = parse_plan()
+    plan = parse_plan() + parse_iteration_plan()
     checked = 0
     missing: list[str] = []
     seen: set[str] = set()
     wildcard_report: list[tuple[str, int]] = []
     for path in plan:
+        if isinstance(path, list):
+            checked += 1
+            if not any((ROOT / candidate).exists() for candidate in path):
+                missing.append(" 或 ".join(path))
+            continue
         if path in seen:
             continue
         seen.add(path)

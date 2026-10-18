@@ -1,10 +1,42 @@
-"""三种模式与超时/重试/幂等（含「异步请求内不触达上游」断言，v2 C4）。"""
+"""三种模式与超时/重试/幂等（含「异步请求内不触达上游」断言，v2 C4 / §A.3.5）。"""
 
 from __future__ import annotations
 
+import asyncio
 import time
 
+import httpx
+from sqlalchemy import select
+
+from skillrouter_api.db import db_session, db_write
+from skillrouter_api.models import CallLog, IdempotencyKey
+from tests.fixtures.builders import route as build_route
 from tests.fixtures.fake_upstream import FakeUpstream, patch_httpx
+
+
+class _FaultyUpstream(FakeUpstream):
+    """可切换的故障上游：`fault` 为 None / 'read_timeout' / 'connect_timeout' / 'reset'。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fault: str | None = None
+
+    def handler(self, request):  # noqa: ANN001, ANN202
+        if not self.fault:
+            return super().handler(request)
+        self.calls.append(
+            {
+                "method": request.method,
+                "url": str(request.url),
+                "headers": dict(request.headers),
+                "body": request.content.decode("utf-8", errors="replace"),
+            }
+        )
+        if self.fault == "read_timeout":
+            raise httpx.ReadTimeout("simulated read timeout", request=request)
+        if self.fault == "connect_timeout":
+            raise httpx.ConnectTimeout("simulated connect timeout", request=request)
+        raise httpx.ConnectError("connection reset by peer", request=request)
 
 
 def _publish(client, admin, capability_id: str, version="1.0.0") -> None:
@@ -161,36 +193,28 @@ def test_stream_mode_returns_sse(client, admin, make_capability, make_token, mon
     assert "你" in text and "好" in text
 
 
-def test_timeout_maps_to_status_unknown(client, admin, make_capability, make_token, monkeypatch) -> None:
-    import httpx
+def test_connect_timeout_is_retryable_and_fails(client, admin, make_capability, make_token, monkeypatch) -> None:
+    """连接阶段超时（未建立连接）属于可重试失败：不是「结果不确定」（§A.3.5）。"""
 
-    original = httpx.AsyncClient
-
-    def boom_factory(*args, **kwargs):  # noqa: ANN001, ANN202
-        def handler(request):  # noqa: ANN001, ANN202
-            raise httpx.ConnectTimeout("timeout", request=request)
-
-        kwargs["transport"] = httpx.MockTransport(handler)
-        return original(*args, **kwargs)
-
+    upstream = _FaultyUpstream()
+    patch_httpx(monkeypatch, upstream)
     cap = make_capability()
-    # 发布需要证据：先用正常上游
-    patch_httpx(monkeypatch, FakeUpstream())
     _publish(client, admin, cap["id"])
     token = make_token()
-    monkeypatch.setattr(httpx, "AsyncClient", boom_factory)
+    upstream.calls.clear()
+    upstream.fault = "connect_timeout"
     r = client.post(
         f"/api/v1/capabilities/{cap['key']}/invoke",
         headers=token["headers"],
         json={"input": {"prompt": "超时"}},
     )
-    assert r.status_code in (200, 504)
     body = r.json()
+    assert r.status_code in (200, 504), r.text
     if r.status_code == 200:
-        assert body["status"] == "status_unknown"
-        assert body["error"]["code"] == "UPSTREAM_TIMEOUT"
-    else:
-        assert body["error"]["code"] == "UPSTREAM_TIMEOUT"
+        assert body["status"] == "failed"
+        assert body["needs_reconcile"] is False
+        assert body["error"]["retryable"] is True
+    assert body["error"]["code"] in ("UPSTREAM_UNAVAILABLE", "UPSTREAM_TIMEOUT")
 
 
 def test_upstream_401_maps_to_auth_error(client, admin, make_capability, make_token, monkeypatch) -> None:
@@ -304,3 +328,169 @@ def test_provider_override_unavailable(client, admin, make_capability, make_toke
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "PROVIDER_NOT_AVAILABLE"
     assert r.json()["error"]["details"]["available"]
+
+
+# ── §A.3.5 / T-09 · T-10 · T-11 ──────────────────────────────
+
+
+def test_read_timeout_does_not_retry_post(
+    client, admin, provider, credential, make_capability, make_token, monkeypatch
+) -> None:
+    """T-09：读超时（请求已发出、无完整响应）不重投、不 failover，`needs_reconcile=1`。"""
+    primary = build_route(provider["id"], credential["id"])
+    primary["retry"] = {"max_attempts": 3, "base_ms": 1, "max_ms": 2}
+    backup = build_route(
+        provider["id"], credential["id"], route_id="rt_backup", priority=1, url_suffix="/v2/generate"
+    )
+    upstream = _FaultyUpstream()
+    patch_httpx(monkeypatch, upstream)
+    cap = make_capability(routes=[primary, backup])
+    _publish(client, admin, cap["id"])
+    token = make_token()
+    upstream.calls.clear()
+    upstream.fault = "read_timeout"
+
+    r = client.post(
+        f"/api/v1/capabilities/{cap['key']}/invoke",
+        headers=token["headers"],
+        json={"input": {"prompt": "读超时"}},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "status_unknown"
+    assert body["status_unknown"] is True
+    assert body["needs_reconcile"] is True
+    assert body["error"]["code"] == "UPSTREAM_TIMEOUT"
+    assert body["error"]["retryable"] is False
+    assert upstream.count("/v1/generate") == 1, "读超时不得重投"
+    assert upstream.count("/v2/generate") == 0, "读超时不得 failover"
+
+    with db_session() as s:
+        row = s.scalar(select(CallLog).where(CallLog.request_id == body["request_id"]))
+    assert row is not None
+    assert row.needs_reconcile == 1
+    assert row.status == "status_unknown"
+
+
+def test_connect_timeout_retries_then_fails(client, admin, make_capability, make_token, monkeypatch) -> None:
+    """T-10：连接阶段（未建立连接）可重试，重试次数 == `max_attempts`。"""
+    upstream = _FaultyUpstream()
+    patch_httpx(monkeypatch, upstream)
+    cap = make_capability()
+    definition = client.get(f"/api/admin/capabilities/{cap['id']}").json()["definition"]
+    definition["routes"][0]["retry"] = {"max_attempts": 3, "base_ms": 1, "max_ms": 2}
+    patch = client.patch(
+        f"/api/admin/capabilities/{cap['id']}",
+        headers=admin["headers"],
+        json={"definition": definition},
+    )
+    assert patch.status_code == 200, patch.text
+    _publish(client, admin, cap["id"])
+    token = make_token()
+    upstream.calls.clear()
+    upstream.fault = "connect_timeout"
+
+    r = client.post(
+        f"/api/v1/capabilities/{cap['key']}/invoke",
+        headers=token["headers"],
+        json={"input": {"prompt": "连接超时"}},
+    )
+    body = r.json()
+    assert r.status_code == 200, r.text
+    assert body["status"] == "failed"
+    assert body["error"]["retryable"] is True
+    assert body["needs_reconcile"] is False
+    assert body["timings"]["failover_switches"] == 0
+    assert upstream.count("/v1/generate") == 3, "连接失败应按 max_attempts 重试"
+
+
+def test_concurrent_same_idem_key_calls_upstream_once(
+    client, admin, make_capability, make_token, monkeypatch
+) -> None:
+    """T-11：并发 5 个同键 → 上游只被打 1 次；其余 409 `IDEMPOTENCY_IN_PROGRESS` 或回放。"""
+    real_async_client = httpx.AsyncClient  # 必须在 patch_httpx 之前抓住真实类
+    upstream = FakeUpstream()
+    patch_httpx(monkeypatch, upstream)
+    cap = make_capability()
+    _publish(client, admin, cap["id"])
+    token = make_token()
+    url = f"/api/v1/capabilities/{cap['key']}/invoke"
+    payload = {"input": {"prompt": "并发同键"}, "options": {"idempotency_key": "concurrent-key"}}
+    calls_before = len(upstream.calls)
+
+    from skillrouter_api.main import app
+
+    async def _fan_out() -> list:
+        transport = httpx.ASGITransport(app=app)
+        async with real_async_client(transport=transport, base_url="http://testserver") as client_async:
+            return await asyncio.gather(
+                *[client_async.post(url, headers=token["headers"], json=payload) for _ in range(5)]
+            )
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)  # 保持 current loop 不被清空，避免污染后续依赖 get_event_loop 的用例
+    responses = loop.run_until_complete(_fan_out())
+    assert len(upstream.calls) - calls_before == 1, "并发同键只能打上游 1 次"
+    ok = [r for r in responses if r.status_code == 200]
+    conflicts = [r for r in responses if r.status_code == 409]
+    assert ok, [r.status_code for r in responses]
+    assert len(ok) + len(conflicts) == 5
+    for r in conflicts:
+        assert r.json()["error"]["code"] == "IDEMPOTENCY_IN_PROGRESS"
+    assert len({r.json()["request_id"] for r in ok}) == 1, "成功的那条必须都是同一个 request_id"
+
+
+def test_expired_in_flight_reservation_can_be_taken_over(
+    client, admin, make_capability, make_token, monkeypatch
+) -> None:
+    """T-11 后半：过期的 `in_flight` 占位可被条件 UPDATE 重新占位并真正执行。"""
+    upstream = FakeUpstream()
+    patch_httpx(monkeypatch, upstream)
+    cap = make_capability()
+    _publish(client, admin, cap["id"])
+    token = make_token()
+    url = f"/api/v1/capabilities/{cap['key']}/invoke"
+    payload = {"input": {"prompt": "陈旧占位"}, "options": {"idempotency_key": "stale-key"}}
+
+    first = client.post(url, headers=token["headers"], json=payload)
+    assert first.status_code == 200, first.text
+    calls_after_first = len(upstream.calls)
+    with db_write() as s:
+        row = s.scalar(select(IdempotencyKey).where(IdempotencyKey.idem_key == "stale-key"))
+        assert row is not None and row.state == "done"
+        row.state = "in_flight"
+        row.expires_at = "2020-01-01T00:00:00Z"
+
+    second = client.post(url, headers=token["headers"], json=payload)
+    assert second.status_code == 200, second.text
+    assert second.json()["request_id"] != first.json()["request_id"], "过期占位必须被重新占位"
+    assert len(upstream.calls) == calls_after_first + 1, "重新占位后应真的再打一次上游"
+    with db_session() as s:
+        row = s.scalar(select(IdempotencyKey).where(IdempotencyKey.idem_key == "stale-key"))
+    assert row.state == "done"
+
+
+def test_idempotency_header_passed_through_to_upstream(
+    client, admin, provider, credential, make_capability, make_token, monkeypatch
+) -> None:
+    """route 声明 `idempotency_header` 时，平台幂等键原样透传给上游（§A.3.5 末条）。"""
+    primary = build_route(provider["id"], credential["id"])
+    primary["request"]["idempotency_header"] = "Idempotency-Key"
+    upstream = FakeUpstream()
+    patch_httpx(monkeypatch, upstream)
+    cap = make_capability(routes=[primary])
+    _publish(client, admin, cap["id"])
+    token = make_token()
+    upstream.calls.clear()
+
+    r = client.post(
+        f"/api/v1/capabilities/{cap['key']}/invoke",
+        headers={**token["headers"], "Idempotency-Key": "pass-through-1"},
+        json={"input": {"prompt": "幂等透传"}},
+    )
+    assert r.status_code == 200, r.text
+    sent = [call for call in upstream.calls if call["url"].endswith("/v1/generate")]
+    assert sent, upstream.calls
+    headers = {k.lower(): v for k, v in sent[-1]["headers"].items()}
+    assert headers.get("idempotency-key") == "pass-through-1"
+

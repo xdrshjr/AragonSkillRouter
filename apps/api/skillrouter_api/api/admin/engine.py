@@ -13,11 +13,19 @@ from ...errors import ApiError, Code
 from ...models import EngineCapabilityStatus, EngineUpgradeRun
 from ...schemas.engine import RollbackEngineRequest, UpgradeRequest
 from ...security.sessions import SessionContext
-from ...services import tasks
+from ...services import settings_runtime, tasks
 from ...settings import settings
-from ...upgrade import detect, rollback, state
+from ...upgrade import detect, rollback, state, switch
 
 router = APIRouter(prefix="/engine", tags=["engine"])
+
+
+def _engine_policy() -> str:
+    """运行时生效的升级策略（DB 覆盖环境变量，60s TTL，§A.3.9）。"""
+    try:
+        return str(settings_runtime.get("engine_policy", settings.engine_policy))
+    except KeyError:  # pragma: no cover - 白名单含该键
+        return settings.engine_policy
 
 
 @router.get("/status")
@@ -37,11 +45,17 @@ async def status(ctx: SessionContext = Depends(require_password_changed)) -> dic
             s.scalars(select(EngineCapabilityStatus).order_by(EngineCapabilityStatus.ordinal))
         )
         running = s.scalar(select(EngineUpgradeRun).where(EngineUpgradeRun.result.is_(None)))
+        latest = s.scalar(select(EngineUpgradeRun).order_by(EngineUpgradeRun.started_at.desc()))
         last_checked = get_state(s, "engine_last_check", None)
     return {
         **detect.settings_note(),
         "engine": engine,
-        "engine_policy": settings.engine_policy,
+        "engine_policy": _engine_policy(),
+        # 「装了但没生效」的排查入口（§A.5.3）：指针来源 + 实际解析到的包目录
+        "pin_source": switch.pin_source(),
+        "resolved_path": switch.resolved_path(),
+        "verify_status": latest.verify_status if latest else None,
+        "blocked_reasons": list(latest.blocked_reasons or []) if latest else [],
         "last_checked_at": last_checked,
         "tools": [
             {"name": t} if isinstance(t, str) else t for t in tools
@@ -81,10 +95,26 @@ async def upgrade(payload: UpgradeRequest, ctx: SessionContext = Depends(require
         raise ApiError(Code.VALIDATION_FAILED, "mode 必须是 verify_only 或 deploy")
     if state.current_run() is not None:
         raise ApiError(Code.UPGRADE_IN_PROGRESS)
-    run_id = state.create_run(to_version=payload.version, mode=payload.mode, policy=settings.engine_policy)
+    if payload.mode == "deploy" and not payload.acknowledge_blocked:
+        last = state.last_candidate_status(payload.version)
+        if last == "blocked":
+            raise ApiError(
+                Code.VALIDATION_FAILED,
+                status=409,
+                message=f"候选 {payload.version} 上次未能验证（verify_status=blocked），部署前必须确认风险",
+                hint="确认风险后带 acknowledge_blocked=true 重新提交（UI 会显示阻断原因）",
+                details={"verify_status": last},
+            )
+    policy = _engine_policy()
+    run_id = state.create_run(to_version=payload.version, mode=payload.mode, policy=policy)
     tasks.enqueue(
         "engine_upgrade",
-        {"run_id": run_id, "version": payload.version, "mode": payload.mode},
+        {
+            "run_id": run_id,
+            "version": payload.version,
+            "mode": payload.mode,
+            "acknowledge_blocked": payload.acknowledge_blocked,
+        },
         priority=9,
         max_attempts=1,
     )

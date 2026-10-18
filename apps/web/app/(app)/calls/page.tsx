@@ -2,7 +2,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import * as React from 'react';
-import { DataTable, useTableState, type DataTableColumn, type FilterChipGroup } from '@/components/common/DataTable';
+import { DataTable, type DataTableColumn, type FilterChipGroup } from '@/components/common/DataTable';
 import { PageHeader } from '@/components/common/PageHeader';
 import { StatusBadge } from '@/components/common/StatusBadge';
 import { RequestIdCopy } from '@/components/common/EmptyState';
@@ -12,19 +12,43 @@ import { Drawer, DrawerContent } from '@/components/ui/drawer';
 import { Skeleton } from '@/components/ui/skeleton';
 import { apiGet, describeError } from '@/lib/api';
 import { formatDateTime, formatDuration, prettyJson } from '@/lib/format';
+import { useTableState } from '@/lib/hooks/useTableState';
 import { queryKeys } from '@/lib/query';
 import type { CallDetail, CallLog, Paginated } from '@/lib/types';
 
-const FILTER_KEYS = ['status', 'capability', 'provider', 'caller', 'from', 'to', 'min_latency'] as const;
+/**
+ * 筛选键即 URL 参数名（§A.3.11）：时间用 `date_from`/`date_to`（`from`/`to` 只是后端兼容别名，
+ * 前端一律发新名字）；`needs_reconcile=1` 由概览「待对账调用」跳转带过来。
+ */
+const FILTER_KEYS = [
+  'status',
+  'capability',
+  'provider',
+  'caller',
+  'date_from',
+  'date_to',
+  'min_latency',
+  'needs_reconcile',
+] as const;
+
+/** `sort` 白名单（后端 `services/calls.py:14`）：越界会 400，因此只允许这三列可排序 */
+const SORT_FIELDS = ['created_at', 'duration_ms', 'status'] as const;
 
 /**
  * 调用记录（spec §13.2 `/calls`）：
- * 筛选（时间/状态/能力/提供商/调用方/最小耗时）+ 表格 + 详情抽屉
+ * 筛选（时间/状态/能力/提供商/调用方/最小耗时/待对账）+ 表格 + 详情抽屉
  * （路由决策 / 重试链 / 错误映射 / 耗时分解）。
  */
 export default function CallsPage() {
-  const table = useTableState({ defaultSort: '-created_at', filterKeys: FILTER_KEYS });
+  const table = useTableState({
+    defaultSort: '-created_at',
+    filterKeys: FILTER_KEYS,
+    sortWhitelist: SORT_FIELDS,
+    dateKeys: ['date_from', 'date_to'],
+    booleanKeys: ['needs_reconcile'],
+  });
   const [detailRequestId, setDetailRequestId] = React.useState<string | null>(null);
+  const needsReconcile = table.filters['needs_reconcile'] === '1';
 
   const list = useQuery<Paginated<CallLog>>({
     queryKey: queryKeys.calls.list(table.requestParams),
@@ -50,6 +74,12 @@ export default function CallsPage() {
         { value: 'status_unknown', label: '状态未知' },
       ],
     },
+    {
+      id: 'needs_reconcile',
+      label: '待对账',
+      value: table.filters['needs_reconcile'] ?? '',
+      options: [{ value: '1', label: '只看待对账' }],
+    },
   ];
 
   const columns: DataTableColumn<CallLog>[] = [
@@ -63,7 +93,6 @@ export default function CallsPage() {
     {
       id: 'capability_key',
       header: '能力',
-      sortable: true,
       cell: (row) => <span className="sr-mono text-12 text-content">{row.capability_key}</span>,
     },
     {
@@ -73,6 +102,7 @@ export default function CallsPage() {
       cell: (row) => (
         <div className="flex flex-wrap items-center gap-1">
           <StatusBadge kind="call" status={row.status} />
+          {row.needs_reconcile ? <Badge tone="warn">待对账</Badge> : null}
           {row.error_code ? <code className="sr-mono text-12 text-danger">{row.error_code}</code> : null}
         </div>
       ),
@@ -103,11 +133,14 @@ export default function CallsPage() {
       ),
     },
     {
-      id: 'latency_ms',
+      // 列 id 用后端排序字段名 `duration_ms`（值仍是 latency_ms/duration_ms 同源），否则表头箭头对不上
+      id: 'duration_ms',
       header: '耗时',
       align: 'right',
       sortable: true,
-      cell: (row) => <span className="text-13 text-content">{formatDuration(row.latency_ms)}</span>,
+      cell: (row) => (
+        <span className="text-13 text-content">{formatDuration(row.duration_ms ?? row.latency_ms)}</span>
+      ),
     },
     {
       id: 'retries',
@@ -136,8 +169,8 @@ export default function CallsPage() {
           <span className="text-12 text-content-muted">起始时间</span>
           <input
             type="datetime-local"
-            value={table.filters['from'] ?? ''}
-            onChange={(event) => table.setFilter('from', event.target.value)}
+            value={table.filters['date_from'] ?? ''}
+            onChange={(event) => table.setFilter('date_from', event.target.value)}
             aria-label="起始时间"
             className="h-8 rounded border border-border bg-surface px-2 text-13 focus-visible:outline-none focus-visible:shadow-[var(--sr-focus-ring)]"
           />
@@ -146,8 +179,8 @@ export default function CallsPage() {
           <span className="text-12 text-content-muted">结束时间</span>
           <input
             type="datetime-local"
-            value={table.filters['to'] ?? ''}
-            onChange={(event) => table.setFilter('to', event.target.value)}
+            value={table.filters['date_to'] ?? ''}
+            onChange={(event) => table.setFilter('date_to', event.target.value)}
             aria-label="结束时间"
             className="h-8 rounded border border-border bg-surface px-2 text-13 focus-visible:outline-none focus-visible:shadow-[var(--sr-focus-ring)]"
           />
@@ -195,6 +228,23 @@ export default function CallsPage() {
           清空筛选
         </Button>
       </section>
+
+      {needsReconcile ? (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-2 rounded border border-warn bg-[var(--sr-warn-weak)] px-3 py-2 text-13 text-content"
+        >
+          <Badge tone="warn" dot>
+            只显示待对账调用
+          </Badge>
+          <span className="text-content-muted">
+            这些调用的结果不确定（可能已在上游执行），请结合任务对账后再决定是否重投。
+          </span>
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => table.setFilter('needs_reconcile', '')}>
+            显示全部
+          </Button>
+        </div>
+      ) : null}
 
       <DataTable
         caption="调用记录"

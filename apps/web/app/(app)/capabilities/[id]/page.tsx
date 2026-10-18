@@ -22,7 +22,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/components/ui/toast';
-import { apiGet, apiPatch, apiPost, describeError } from '@/lib/api';
+import { apiGet, apiPatch, apiPost, describeError, testCapability } from '@/lib/api';
 import { formatDateTime, prettyJson } from '@/lib/format';
 import { queryKeys } from '@/lib/query';
 import type {
@@ -31,6 +31,7 @@ import type {
   CapabilityIssue,
   CapabilityRoute,
   CapabilityTestResult,
+  CapabilityTestRun,
   CapabilityValidation,
   JsonObject,
   Paginated,
@@ -68,6 +69,21 @@ const DEFAULT_INPUT_SCHEMA: JsonObject = {
   required: ['prompt'],
   additionalProperties: false,
 };
+
+/** 测试证据有效期：发布闸门只认 24h 内的成功测试（spec §A.3.1） */
+const TEST_EVIDENCE_WINDOW_MS = 86_400_000;
+
+/**
+ * 「测试通过」的唯一判定：`test_runs[].ok === true` 且 `at` 在 24h 内。
+ *
+ * `ok` 是**布尔**（后端 `bool(t.ok)`）。写成 `=== 1` 会恒为 false，
+ * 让发布按钮永久禁用（F-01 以另一种形式复发），所以这里只做 `=== true`。
+ */
+function hasFreshTestEvidence(runs: CapabilityTestRun[], now: number): boolean {
+  return runs.some(
+    (run) => run.ok === true && Number.isFinite(Date.parse(run.at)) && Date.parse(run.at) >= now - TEST_EVIDENCE_WINDOW_MS,
+  );
+}
 
 function toDraft(capability: Capability): DraftState {
   // 后端详情接口把可编辑定义放在 `definition`（列表接口不返回），
@@ -120,7 +136,6 @@ export default function CapabilityDetailPage() {
   const [draft, setDraft] = React.useState<DraftState | null>(null);
   const [routes, setRoutes] = React.useState<CapabilityRoute[]>([]);
   const [saved, setSaved] = React.useState(true);
-  const [testedOk, setTestedOk] = React.useState(false);
   const [issues, setIssues] = React.useState<CapabilityIssue[] | null>(null);
   const [publishOpen, setPublishOpen] = React.useState(false);
   const [deprecateOpen, setDeprecateOpen] = React.useState(false);
@@ -177,6 +192,19 @@ export default function CapabilityDetailPage() {
       setDraft(toDraft(capability.data));
     }
   }, [capability.data, draft]);
+
+  /**
+   * 「测试通过」徽标与发布闸门**同源**：都读落库的 `test_runs`（`ok === true` 且 24h 内）。
+   * 这样刷新页面后按钮仍可用，而不是依赖本次会话里的测试响应。
+   */
+  const testRuns = React.useMemo<CapabilityTestRun[]>(
+    () => capability.data?.test_runs ?? [],
+    [capability.data],
+  );
+  const [testedOk, setTestedOk] = React.useState(false);
+  React.useEffect(() => {
+    setTestedOk(hasFreshTestEvidence(testRuns, Date.now()));
+  }, [testRuns]);
 
   React.useEffect(() => {
     const data = routeList.data;
@@ -280,14 +308,25 @@ export default function CapabilityDetailPage() {
     mode?: CallMode;
     save_payload: boolean;
   }): Promise<CapabilityTestResult> => {
-    const result = await apiPost<CapabilityTestResult>(`/admin/capabilities/${capabilityId}/test`, {
-      ...payload,
+    const result = await testCapability(capabilityId, {
+      input: payload.input,
       route_id: payload.route_id ?? null,
       mode: payload.mode ?? null,
+      save_payload: payload.save_payload,
     });
-    setTestedOk(result.ok);
-    if (result.ok) {
+    // 通过判定只认 `status === 'succeeded'`（返回体里没有 `ok`）；
+    // 证据本身来自落库记录，所以这里重新拉详情：徽标与发布闸门读同一份 `test_runs`。
+    await queryClient.invalidateQueries({ queryKey: queryKeys.capabilities.detail(capabilityId) });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.capabilities.all });
+    if (result.status === 'succeeded') {
       toast({ title: '测试通过', description: '证据有效期 24 小时，之后需重新测试。', tone: 'ok' });
+    } else if (result.status === 'status_unknown') {
+      toast({
+        title: '测试结果不确定',
+        description: '上游可能已执行但未确认；重复测试可能产生双份费用。',
+        tone: 'warn',
+        requestId: result.error?.request_id ?? null,
+      });
     } else {
       toast({
         title: '测试未通过',
@@ -361,10 +400,24 @@ export default function CapabilityDetailPage() {
     );
   }
 
-  const published = capability.data?.status === 'published';
+  // 三态徽标语义固定（spec §A.3.1）：
+  // 「已发布」= published_version_id 非空（不是只看 status）；
+  // 「可调用」= 已发布 + 能力 status === 'published' + 所有启用 route 的凭证都是 active。
+  const published = Boolean(capability.data?.published_version_id);
   const enabled = capability.data?.enabled ?? true;
   const primaryRoute = [...routes].filter((route) => route.enabled).sort((a, b) => a.priority - b.priority)[0];
-  const callable = published && enabled && Boolean(primaryRoute);
+  const credentialStatus = new Map<string, string>();
+  for (const provider of routeProviders) {
+    for (const credential of provider.credentials) {
+      credentialStatus.set(credential.id, credential.status);
+    }
+  }
+  const liveRoutes = routes.filter((route) => route.enabled);
+  const routesCredentialsActive =
+    liveRoutes.length > 0 && liveRoutes.every((route) => credentialStatus.get(route.credential_id) === 'active');
+  const callable =
+    published && capability.data?.status === 'published' && enabled && routesCredentialsActive;
+  const lastTestRun = testRuns[0] ?? null;
   const inputFields = Object.keys(
     (draft.input_schema['properties'] as Record<string, unknown> | undefined) ?? {},
   );
@@ -402,7 +455,9 @@ export default function CapabilityDetailPage() {
             <Button
               variant="primary"
               size="sm"
-              disabled={!testedOk || published || !saved}
+              // 「已发布」是独立徽标，不是发布的拦路条件：改完定义、重新测试通过后
+              // 必须还能发新版本（发布永远创建新版本，旧版本保持不可变）
+              disabled={!testedOk || !saved}
               onClick={() => {
                 setPublishVersion(nextVersion);
                 setPublishOpen(true);
@@ -933,6 +988,7 @@ export default function CapabilityDetailPage() {
               routes={routes}
               examples={draft.examples}
               onRun={runTest}
+              history={testRuns}
               disabled={!saved}
             />
             {!saved ? (
@@ -961,6 +1017,21 @@ export default function CapabilityDetailPage() {
                 </dd>
               </div>
               <div className="flex justify-between">
+                <dt className="text-content-muted">最近测试</dt>
+                <dd className="text-content">
+                  {lastTestRun ? (
+                    <span className="flex items-center gap-1">
+                      <Badge tone={lastTestRun.ok ? 'ok' : 'danger'} dot>
+                        {lastTestRun.ok ? '通过' : '未通过'}
+                      </Badge>
+                      <span className="text-12 text-content-muted">{formatDateTime(lastTestRun.at)}</span>
+                    </span>
+                  ) : (
+                    <span className="text-12 text-content-muted">从未测试</span>
+                  )}
+                </dd>
+              </div>
+              <div className="flex justify-between">
                 <dt className="text-content-muted">主力 route</dt>
                 <dd className="truncate text-content">
                   {primaryRoute
@@ -971,8 +1042,15 @@ export default function CapabilityDetailPage() {
               </div>
             </dl>
             <p className="mt-2 text-12 text-content-muted">
-              发布要求：最近 24 小时内有一次通过的真实测试，且配置已保存。
+              发布要求：最近 24 小时内有<b>一条落库的</b>通过测试（读 <code className="sr-mono">test_runs</code>，与顶部「测试通过」徽标同源），且配置已保存。
             </p>
+            {published && !callable ? (
+              <p className="mt-1 text-12 text-warn">
+                {routesCredentialsActive
+                  ? '能力状态不是 published 或已停用，因此对外不可调用。'
+                  : '有启用 route 的凭证不是 active：已发布，但当前不可调用。'}
+              </p>
+            ) : null}
           </section>
         </aside>
       </div>
@@ -1024,7 +1102,7 @@ export default function CapabilityDetailPage() {
             ) : null}
             <p className="text-12 text-content-muted">
               已保存 {saved ? '是' : '否'} · 测试通过 {testedOk ? '是' : '否'} · 上一次测试时间{' '}
-              {capability.data?.last_test_at ? formatDateTime(capability.data.last_test_at) : '未知'}
+              {lastTestRun ? formatDateTime(lastTestRun.at) : '从未测试'}
             </p>
           </div>
         </DialogContent>

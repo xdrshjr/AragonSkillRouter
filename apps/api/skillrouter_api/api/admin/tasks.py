@@ -1,4 +1,4 @@
-"""任务路由（§9.2 `/tasks*`）。"""
+"""任务路由（§9.2 `/tasks*` / §A.3.11 列表契约）。"""
 
 from __future__ import annotations
 
@@ -15,13 +15,17 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 async def list_tasks(
     status: str | None = None,
     capability: str | None = None,
+    capability_key: str | None = None,
     paging: dict = Depends(page_params),
     ctx: SessionContext = Depends(require_password_changed),
 ) -> dict:
+    """`q` 覆盖 `request_id`/`capability_key`/`upstream_task_id`；`sort` 走白名单。"""
     return tasks.list_tasks(
         status=status,
         capability=capability,
+        capability_key=capability_key,
         q=paging["q"],
+        sort=paging["sort"],
         page=paging["page"],
         page_size=paging["page_size"],
     )

@@ -18,10 +18,16 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/components/ui/toast';
-import { apiGet, apiPatch, apiPost, describeError } from '@/lib/api';
-import { formatDateTime } from '@/lib/format';
+import { apiGet, apiPost, describeError, isApiError, saveSettings, triggerBackupNow } from '@/lib/api';
+import { formatBytes, formatDateTime, formatRelative } from '@/lib/format';
 import { queryKeys } from '@/lib/query';
-import type { AuditLogEntry, BackupResult, Paginated, PlatformSettings, RotateMasterKeyResult } from '@/lib/types';
+import type {
+  AuditLogEntry,
+  BackupNowResult,
+  Paginated,
+  PlatformSettings,
+  RotateMasterKeyResult,
+} from '@/lib/types';
 
 const schema = z.object({
   payload_policy: z.enum(['none', 'redacted_preview', 'full']),
@@ -42,7 +48,8 @@ export default function SettingsPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [rotateOpen, setRotateOpen] = React.useState(false);
-  const [backupResult, setBackupResult] = React.useState<BackupResult | null>(null);
+  const [backupResult, setBackupResult] = React.useState<BackupNowResult | null>(null);
+  const [savedAt, setSavedAt] = React.useState<string | null>(null);
 
   const settings = useQuery<PlatformSettings>({
     queryKey: queryKeys.settings.detail(),
@@ -70,7 +77,14 @@ export default function SettingsPage() {
     form.reset({
       payload_policy: settings.data.payload_policy,
       retention_days: settings.data.retention_days,
-      fetch_allowlist: (settings.data.fetch_allowlist ?? []).join('\n'),
+      // 后端已统一成 string[]；历史行可能是逗号分隔字符串，这里兜住不让整页崩掉
+      fetch_allowlist: Array.isArray(settings.data.fetch_allowlist)
+        ? settings.data.fetch_allowlist.join('\n')
+        : String(settings.data.fetch_allowlist ?? '')
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .join('\n'),
       // 后端 GET /admin/settings 的字段是 default_budget_usd（没有嵌套 budget 对象）
       default_budget_usd: settings.data.default_budget_usd ?? 0,
       engine_policy: settings.data.engine_policy,
@@ -79,7 +93,7 @@ export default function SettingsPage() {
 
   const save = useMutation({
     mutationFn: async (values: SettingsForm) =>
-      apiPatch<PlatformSettings>('/admin/settings', {
+      saveSettings({
         payload_policy: values.payload_policy,
         retention_days: values.retention_days,
         fetch_allowlist: values.fetch_allowlist
@@ -89,19 +103,22 @@ export default function SettingsPage() {
         default_budget_usd: values.default_budget_usd,
         engine_policy: values.engine_policy,
       }),
-    onSuccess: async (_data, values, context) => {
+    onSuccess: async (saved, _values, context) => {
       // request_id 由 api 层回显；这里在 toast 中展示以便报障
-      const requestId =
-        typeof context === 'string' ? context : null;
+      const requestId = typeof context === 'string' ? context : null;
+      const workerScope = saved?.effective?.worker;
+      const workerNote = workerScope
+        ? `worker 最多 60 秒内生效（服务端声明 ${workerScope}）`
+        : 'worker 最多 60 秒内生效';
       toast({
         title: '设置已保存',
-        description: requestId ? `request_id ${requestId}` : '变更已生效（含审计记录）。',
+        description: `API 立即生效；${workerNote}。${requestId ? `request_id ${requestId}` : ''}`.trim(),
         tone: 'ok',
         requestId,
       });
+      setSavedAt(saved?.saved_at ?? new Date().toISOString());
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings.detail() });
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings.audit({ page: 1, page_size: 20, sort: '-at' }) });
-      void values;
     },
     onError: (cause) => {
       const info = describeError(cause);
@@ -115,19 +132,24 @@ export default function SettingsPage() {
   });
 
   const backup = useMutation({
-    // POST /settings/backup 只是入队（202 + queue_id）；要拿到可下载产物必须走 /settings/backup/now
-    mutationFn: async () => apiGet<BackupResult>('/admin/settings/backup/now'),
+    // `POST /settings/backup/now` 同步执行并返回真实产物名 + sha256；旧 GET 已删除（GET 会 405）
+    mutationFn: async () => triggerBackupNow(),
     onSuccess: (result) => {
       setBackupResult(result);
       toast({
         title: '备份已生成',
-        description: `产物 ${result.file_id}${result.sha256 ? `（sha256 ${result.sha256.slice(0, 12)}…）` : ''}`,
+        description: `产物 ${result.product} · sha256 ${result.sha256.slice(0, 12)}…`,
         tone: 'ok',
       });
     },
     onError: (cause) => {
       const info = describeError(cause);
-      toast({ title: '备份失败', description: info.message, tone: 'danger', requestId: info.requestId });
+      toast({
+        title: isApiError(cause) && cause.status === 405 ? '备份接口已改为 POST' : '备份失败',
+        description: info.hint ? `${info.message}（${info.hint}）` : info.message,
+        tone: 'danger',
+        requestId: info.requestId,
+      });
     },
   });
 
@@ -198,6 +220,19 @@ export default function SettingsPage() {
           ) : null
         }
       />
+
+      {savedAt ? (
+        <p
+          role="status"
+          className="flex flex-wrap items-center gap-2 rounded border border-border bg-[var(--sr-surface-sunken)] px-3 py-2 text-12 text-content-muted"
+        >
+          <Badge tone="ok" dot>
+            已保存
+          </Badge>
+          <span>保存于 {formatRelative(savedAt)}</span>
+          <span>· API 立即生效；worker 最多 60 秒内生效</span>
+        </p>
+      ) : null}
 
       <Tabs defaultValue="general">
         <TabsList>
@@ -272,6 +307,15 @@ export default function SettingsPage() {
             <p className="text-12 text-content-muted">
               令牌级预算在「接入与令牌」页配置；超限时返回 402 BUDGET_EXCEEDED，不做静默降级。
             </p>
+            {/* F-05 / F-13：计费口径变更必须显式告知，避免被当成 bug 报障 */}
+            <div className="rounded border border-warn bg-[var(--sr-warn-weak)] px-3 py-2 text-12 text-content">
+              <p className="font-medium">计费口径变更（本轮起）：</p>
+              <ul className="mt-1 flex flex-col gap-0.5 text-content-muted">
+                <li>· 流式（stream）、异步（async）与测试调用（测试面板 / Agent 自测）都会计费，不再只有 sync 计费。</li>
+                <li>· 因此存量令牌里的小预算可能提前耗尽，随后调用返回 402 BUDGET_EXCEEDED（不是 429）。</li>
+                <li>· 遇到 402 请到「接入与令牌」调高该令牌预算，或等到下个计费周期。</li>
+              </ul>
+            </div>
           </section>
         </TabsContent>
 
@@ -359,14 +403,34 @@ export default function SettingsPage() {
               <p className="mt-1 text-13 text-content-muted">
                 备份包含数据库与文件索引（不含主密钥）。恢复需要匹配的主密钥，详见 runbook。
               </p>
-              <div className="mt-2 flex items-center gap-2">
+              <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Button variant="secondary" size="sm" loading={backup.isPending} onClick={() => backup.mutate()}>
                   立即备份
                 </Button>
-                {backupResult ? (
-                  <span className="sr-mono text-12 text-content-muted">产物 file_id {backupResult.file_id}</span>
-                ) : null}
+                <span className="text-12 text-content-muted">同步执行（POST /settings/backup/now），返回真实产物名与 sha256。</span>
               </div>
+              {backupResult ? (
+                <dl className="mt-2 grid grid-cols-1 gap-1 rounded border border-border bg-[var(--sr-surface-sunken)] px-3 py-2 text-12 sm:grid-cols-2">
+                  <div>
+                    <dt className="text-content-muted">产物名</dt>
+                    <dd className="sr-mono break-all text-content">{backupResult.product}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-content-muted">sha256</dt>
+                    <dd className="sr-mono break-all text-content">{backupResult.sha256}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-content-muted">file_id</dt>
+                    <dd className="sr-mono break-all text-content">{backupResult.file_id}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-content-muted">大小</dt>
+                    <dd className="text-content">
+                      {backupResult.size === null ? "—" : formatBytes(backupResult.size)}
+                    </dd>
+                  </div>
+                </dl>
+              ) : null}
             </section>
 
             {/* 危险区（独立） */}

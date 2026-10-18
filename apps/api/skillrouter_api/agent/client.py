@@ -206,6 +206,8 @@ class AragonAgentAdapter:
 
     async def replay_messages(self, session_id: str, limit: int = 20) -> list[dict]:
         """重启后用最近 N 轮重建上下文（上游无持久化）。"""
+        from sqlalchemy import select
+
         from ..db import db_session
         from ..models import AgentEventRow
 
@@ -239,12 +241,12 @@ class AragonAgentAdapter:
             "active_turns": health.get("active_turns", 0),
         }
 
-    async def reload_engine(self, target_version: str) -> dict:
+    async def reload_engine(self, target_version: str, *, engine_home: str | None = None) -> dict:
         try:
             async with httpx.AsyncClient(**client_kwargs(self.base_url, timeout=180.0)) as client:
                 response = await client.post(
                     f"{self.base_url}/internal/admin/reload",
-                    json={"target_version": target_version},
+                    json=_reload_body(target_version, engine_home),
                     headers=self._headers,
                 )
             return {"status": response.status_code, **(response.json() if response.content else {})}
@@ -254,6 +256,14 @@ class AragonAgentAdapter:
                 message="无法调用网关热切换接口",
                 details={"reason": redact(str(exc), max_len=200)},
             ) from exc
+
+
+def _reload_body(target_version: str, engine_home: str | None) -> dict:
+    """reload 请求体：新字段 `version`/`engine_home` + 兼容旧网关的 `target_version`（§A.5.3）。"""
+    body: dict = {"version": target_version, "target_version": target_version}
+    if engine_home:
+        body["engine_home"] = engine_home
+    return body
 
 
 adapter = AragonAgentAdapter()

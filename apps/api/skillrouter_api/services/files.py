@@ -111,7 +111,17 @@ def save_bytes(
                     created_at=now_iso(),
                 )
             )
-    return {"file_id": file_id, "mime": mime, "size": len(data), "sha256": digest, "expires_at": expires_at}
+    signed = signed_url(file_id, owner_id)
+    return {
+        "file_id": file_id,
+        "mime": mime,
+        "size": len(data),
+        "sha256": digest,
+        "expires_at": expires_at,
+        # 与 `describe()` 同一套签名算法与 TTL 常量（§A.3.10-3 / T-48）
+        "signed_url": signed["url"],
+        "signed_url_expires_at": signed["expires_at"],
+    }
 
 
 def get_record(file_id: str) -> FileObject:

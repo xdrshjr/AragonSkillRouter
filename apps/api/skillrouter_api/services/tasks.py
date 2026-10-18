@@ -11,11 +11,22 @@ from ..errors import ApiError, Code
 from ..logging import get_logger, redact
 from ..models import Task, TaskQueue
 from ..schemas.common import paginate
+from ..settings import settings
 
 log = get_logger("skillrouter.run")
 
+#: 终态集合（取消/恢复判定都以此为准）
+TERMINAL_STATUSES = frozenset({"succeeded", "failed", "canceled"})
+
+#: `status='canceling'` 的第 2 次重启恢复阈值：`result.cancel_requeues` 计数
+CANCEL_REQUEUE_FIELD = "cancel_requeues"
+
+#: `sort` 白名单（§A.3.11 `GET /api/admin/tasks`）
+SORT_FIELDS = ("created_at", "updated_at", "status")
+
 ALLOWED = {
-    "queued": {"running", "canceled", "failed"},
+    # `queued → canceling`：提交前取消的唯一合法路径（§A.3.6，缺它会抛 INVALID_STATE_TRANSITION）
+    "queued": {"running", "canceling", "canceled", "failed"},
     "running": {"succeeded", "failed", "canceling", "canceled", "status_unknown"},
     "status_unknown": {"running", "failed", "succeeded"},
     "canceling": {"canceled", "status_unknown", "failed"},
@@ -23,6 +34,19 @@ ALLOWED = {
     "succeeded": set(),
     "failed": set(),
 }
+
+
+def _iso_offset(seconds: int) -> str:
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _result_with(row: Task, **updates: object) -> dict:
+    """合并 `result` 里的标记（JSON 列必须整体重新赋值才会落库）。"""
+    data = dict(row.result or {})
+    data.update(updates)
+    return data
 
 
 def enqueue(kind: str, payload: dict, *, priority: int = 0, delay_s: int = 0, max_attempts: int = 3) -> str:
@@ -56,6 +80,9 @@ def transition(task: Task, target: str) -> None:
             message=f"任务状态不能从 {task.status} 迁移到 {target}",
             details={"from": task.status, "to": target},
         )
+    if target == "canceling" and not task.cancel_requested_at:
+        # 不变式 I2：`canceling` 必有取消意图时间戳。由唯一入口补写，任何调用方都绕不过去。
+        task.cancel_requested_at = now_iso()
     task.status = target
     task.updated_at = now_iso()
     if target in ("succeeded", "failed", "canceled"):
@@ -139,6 +166,8 @@ def _detail(row: Task) -> dict:
         "max_attempts": row.max_attempts,
         "failure_class": row.failure_class,
         "cancel_capability": row.cancel_capability,
+        "cancel_requested_at": row.cancel_requested_at,
+        "cancel_scope": cancel_scope(row),
         "error": (
             {"code": row.error_code, "message": row.error_detail_redacted}
             if row.error_code
@@ -151,6 +180,15 @@ def _detail(row: Task) -> dict:
         "updated_at": row.updated_at,
         "finished_at": row.finished_at,
     }
+
+
+def cancel_scope(row: Task) -> str:
+    """`cancel_scope` 四值枚举：`none / pending_submit / remote / local_only`（§A.5.1）。"""
+    if not row.cancel_requested_at:
+        return "none"
+    if not row.upstream_task_id:
+        return "pending_submit"
+    return "remote" if row.cancel_capability == "remote" else "local_only"
 
 
 def _status_detail(row: Task) -> str:
@@ -166,33 +204,56 @@ def _status_detail(row: Task) -> str:
     return mapping.get(row.status, row.status)
 
 
+def _order_by(sort: str | None):
+    """`sort` 白名单校验并转成 ORDER BY 子句（越界 → 400 `VALIDATION_FAILED`）。"""
+    raw = (sort or "-created_at").strip()
+    clauses = []
+    for token in [part.strip() for part in raw.split(",") if part.strip()]:
+        descending = token.startswith("-")
+        field = token.lstrip("-+")
+        if field not in SORT_FIELDS:
+            raise ApiError(
+                Code.VALIDATION_FAILED,
+                message=f"不支持的排序字段：{field}",
+                details={"allowed": list(SORT_FIELDS)},
+            )
+        column = getattr(Task, field)
+        clauses.append(column.desc() if descending else column.asc())
+    return clauses or [Task.created_at.desc()]
+
+
 def list_tasks(
     *,
     status: str | None = None,
     capability: str | None = None,
+    capability_key: str | None = None,
     q: str | None = None,
+    sort: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
+    clauses = _order_by(sort)
+    key = capability_key or capability
     with db_session() as s:
-        stmt = select(Task).order_by(desc(Task.created_at))
+        stmt = select(Task).order_by(*clauses)
         if status == "active":
             stmt = stmt.where(Task.status.in_(("queued", "running", "canceling")))
         elif status == "unknown":
             stmt = stmt.where(Task.status == "status_unknown")
         elif status:
             stmt = stmt.where(Task.status == status)
-        if capability:
-            stmt = stmt.where(Task.capability_key == capability)
-        rows = list(s.scalars(stmt.limit(1000)))
+        if key:
+            stmt = stmt.where(Task.capability_key == key)
+        rows = list(s.scalars(stmt.limit(2000)))
     items = [_detail(r) for r in rows]
     if q:
         needle = q.lower()
         items = [
             i
             for i in items
-            if needle in i["task_id"].lower()
-            or needle in i["capability_key"].lower()
+            if needle in (i["request_id"] or "").lower()
+            or needle in (i["task_id"] or "").lower()
+            or needle in (i["capability_key"] or "").lower()
             or needle in (i["upstream_task_id"] or "").lower()
         ]
     return paginate(items, page, page_size)
@@ -209,17 +270,35 @@ def update_progress(task_id: str, *, percent: int | None = None, stage: str | No
             row.updated_at = now_iso()
 
 
-def mark_running(task_id: str, *, upstream_task_id: str | None = None) -> None:
+def mark_running(task_id: str, *, upstream_task_id: str | None = None) -> dict:
+    """提交成功后的状态写入：`queued → running`，但有取消意图时保持 `canceling`（§A.3.6-2）。
+
+    返回 `{"cancel_pending": bool, "status": str}`：`cancel_pending=True` 表示用户在提交途中
+    已经请求取消，handler 必须立刻追取消而不是进轮询循环。
+    """
     with db_write() as s:
         row = s.get(Task, task_id)
         if row is None:
             raise ApiError(Code.NOT_FOUND, "任务不存在")
+        if row.status in TERMINAL_STATUSES:
+            return {"cancel_pending": False, "status": row.status, "terminal": True}
+        pending = bool(row.cancel_requested_at)
+        if pending:
+            if upstream_task_id:
+                row.upstream_task_id = upstream_task_id
+                row.cancel_capability = "remote"
+            if row.status != "canceling":
+                transition(row, "canceling")
+            row.progress_stage = "cancel_pending"
+            row.updated_at = now_iso()
+            return {"cancel_pending": True, "status": row.status}
         transition(row, "running")
         row.attempts = int(row.attempts or 0) + 1
         if upstream_task_id:
             row.upstream_task_id = upstream_task_id
             row.cancel_capability = "remote"
         row.progress_stage = "upstream_polling" if upstream_task_id else "submitting"
+        return {"cancel_pending": False, "status": row.status}
 
 
 def claim_submission(task_id: str) -> bool:
@@ -276,22 +355,56 @@ def finish(task_id: str, *, status: str, result: dict | None = None, error: dict
 
 
 def cancel(task_id: str, *, scope: str = "remote") -> dict:
+    """取消任务：判定顺序固定为「终态 → 无 upstream id → remote → local_only」（§A.3.6-1）。
+
+    顺序不能颠倒：`cancel_capability` 判在 `upstream_task_id` 之前会把「提交中取消」误判成
+    `local_only` 直接置 `canceled`，于是 handler 拿到上游任务后无人追取消（F-07 现场）。
+    """
     with db_write() as s:
         row = s.get(Task, task_id)
         if row is None:
             raise ApiError(Code.NOT_FOUND, "任务不存在")
-        if row.status in ("succeeded", "failed", "canceled"):
-            return {"ok": False, "status": row.status, "cancel_scope": "none"}
-        if row.cancel_capability != "remote":
-            transition(row, "canceled")
+        if row.status in TERMINAL_STATUSES:
+            return {
+                "ok": False,
+                "status": row.status,
+                "cancel_scope": "none",
+                "cancel_requested_at": row.cancel_requested_at,
+            }
+        if not row.upstream_task_id:
+            # 提交前取消：只保留意图，等 handler 拿到 upstream id 后追取消（不直接 canceled）
+            row.cancel_requested_at = row.cancel_requested_at or now_iso()
+            if row.status != "canceling":
+                transition(row, "canceling")
+            row.progress_stage = "cancel_pending"
+            row.updated_at = now_iso()
             return {
                 "ok": True,
-                "status": "canceled",
-                "cancel_scope": "local_only",
-                "note": "已停止平台侧等待；上游任务可能仍在执行并产生费用",
+                "status": "canceling",
+                "cancel_scope": "pending_submit",
+                "cancel_requested_at": row.cancel_requested_at,
+                "note": "已请求取消；提交中的请求会被追取消",
             }
-        transition(row, "canceling")
-        return {"ok": True, "status": "canceling", "cancel_scope": scope}
+        row.cancel_requested_at = row.cancel_requested_at or now_iso()
+        if row.cancel_capability == "remote":
+            if row.status != "canceling":
+                transition(row, "canceling")
+            return {
+                "ok": True,
+                "status": "canceling",
+                "cancel_scope": scope,
+                "cancel_requested_at": row.cancel_requested_at,
+            }
+        # 上游不支持取消：本地停止等待，但 upstream_task_id 必须留在行里供人工追踪
+        transition(row, "canceled")
+        return {
+            "ok": True,
+            "status": "canceled",
+            "cancel_scope": "local_only",
+            "cancel_requested_at": row.cancel_requested_at,
+            "upstream_task_id": row.upstream_task_id,
+            "note": "已停止平台侧等待；上游任务可能仍在执行并产生费用",
+        }
 
 
 def mark_canceled(task_id: str, *, upstream_ok: bool) -> dict:
@@ -299,10 +412,19 @@ def mark_canceled(task_id: str, *, upstream_ok: bool) -> dict:
         row = s.get(Task, task_id)
         if row is None:
             raise ApiError(Code.NOT_FOUND, "任务不存在")
-        if upstream_ok:
-            transition(row, "canceled")
-            return {"status": "canceled", "cancel_scope": "remote"}
+        had_upstream = bool(row.upstream_task_id)
+        if row.status in TERMINAL_STATUSES:
+            return {"status": row.status, "cancel_scope": cancel_scope(row)}
         transition(row, "canceled")
+        if not had_upstream:
+            # 从未提交到上游：没有远端任务可追，别说「远端可能仍在执行」
+            return {
+                "status": "canceled",
+                "cancel_scope": "pending_submit",
+                "note": "任务尚未提交到上游，已在平台侧取消",
+            }
+        if upstream_ok:
+            return {"status": "canceled", "cancel_scope": "remote"}
         return {
             "status": "canceled",
             "cancel_scope": "local_only",
@@ -325,13 +447,23 @@ def reconcile(task_id: str) -> dict:
 
 
 def recover_on_startup() -> dict:
-    """worker 启动：复位过期租约 + 恢复未完成任务轮询。
+    """worker 启动：复位过期租约 + 恢复未完成任务轮询 + 收敛悬挂的 `canceling`（§A.3.6）。
 
-    只给「队列里没有在途条目」的任务补一条恢复条目；否则重启会把同一个
-    异步任务排两次，两个执行者各提交一次上游 = 重复下单（§7.8）。
+    - 通用恢复只给「队列里没有在途条目」的任务补一条；否则重启会把同一个异步任务排两次，
+      两个执行者各提交一次上游 = 重复下单（§7.8）。
+    - `canceling` 分两类单独收敛，否则任务会永久停在 `canceling`：
+      1) `upstream_task_id IS NULL` 且 `cancel_requested_at` 早于
+         `settings.cancel_reconcile_minutes`（默认 30）→ `canceled` + `resume_policy='abandon'`；
+      2) `upstream_task_id IS NOT NULL`（worker 崩在追取消途中）→ 重新入队一次 `cancel_only`；
+         第 2 次直接 `canceled(local_only)` 并写明远端可能仍在执行。
     """
+    threshold_minutes = int(getattr(settings, "cancel_reconcile_minutes", 30) or 30)
+    threshold = _iso_offset(-threshold_minutes * 60)
     now = now_iso()
     reset = 0
+    abandoned = 0
+    cancel_requeued = 0
+    planned: list[dict] = []
     with db_write() as s:
         for item in s.scalars(select(TaskQueue).where(TaskQueue.status == "leased")):
             if not item.lease_expires_at or item.lease_expires_at < now:
@@ -351,18 +483,59 @@ def recover_on_startup() -> dict:
                 select(TaskQueue).where(TaskQueue.status.in_(("queued", "leased")))
             )
         }
+        for task in pending:
+            if task.status == "canceling":
+                if not task.upstream_task_id:
+                    requested = task.cancel_requested_at or ""
+                    if not requested or requested < threshold:
+                        transition(task, "canceled")
+                        task.resume_policy = "abandon"
+                        task.error_detail_redacted = "提交前取消长时间未收敛，已在平台侧放弃（上游未受理）"
+                        task.result = _result_with(
+                            task, cancel_scope="pending_submit", cancel_note="提交前取消已放弃"
+                        )
+                        abandoned += 1
+                    continue
+                requeues = int((task.result or {}).get(CANCEL_REQUEUE_FIELD) or 0)
+                if requeues >= 1:
+                    transition(task, "canceled")
+                    task.resume_policy = "abandon"
+                    task.error_detail_redacted = "上游确认失败，远端可能仍在执行"
+                    task.result = _result_with(
+                        task, cancel_scope="local_only", cancel_note="上游确认失败，远端可能仍在执行"
+                    )
+                    abandoned += 1
+                    continue
+                if task.id in in_flight:
+                    continue
+                task.result = _result_with(task, **{CANCEL_REQUEUE_FIELD: requeues + 1})
+                planned.append(
+                    {"task_id": task.id, "request_id": task.request_id, "cancel_only": True}
+                )
+                cancel_requeued += 1
+                continue
+            if task.id in in_flight:
+                continue
+            planned.append({"task_id": task.id, "request_id": task.request_id, "resume": True})
     resumed = 0
-    for task in pending:
-        if task.id in in_flight:
-            continue
+    for payload in planned:
+        cancel_only = bool(payload.get("cancel_only"))
         queued = enqueue(
             "capability_invoke_async",
-            {"task_id": task.id, "request_id": task.request_id, "resume": True},
-            priority=3,
+            payload,
+            priority=9 if cancel_only else 3,
         )
-        resumed += 1
-        log.info("task_resumed", extra={"object": task.id, "detail": queued})
-    return {"requeued_leases": reset, "resumed_tasks": resumed}
+        if cancel_only:
+            log.info("task_cancel_requeued", extra={"object": payload["task_id"], "detail": queued})
+        else:
+            resumed += 1
+            log.info("task_resumed", extra={"object": payload["task_id"], "detail": queued})
+    return {
+        "requeued_leases": reset,
+        "resumed_tasks": resumed,
+        "cancel_requeued": cancel_requeued,
+        "cancel_abandoned": abandoned,
+    }
 
 
 def queue_depth() -> int:

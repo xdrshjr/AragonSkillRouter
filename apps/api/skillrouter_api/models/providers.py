@@ -35,6 +35,8 @@ class Credential(Base, IdMixin, TimestampMixin):
     secret_mask: Mapped[str] = mapped_column(String(64), default="***", nullable=False)
     secret_fingerprint: Mapped[str] = mapped_column(String(32), default="", nullable=False)
     meta: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    #: 敏感 meta 的信封加密列（AAD `record_type="credential_meta"`），不出现在任何投影里
+    meta_sealed: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False)
     expires_at: Mapped[str | None] = mapped_column(String(32))
     last_verified_at: Mapped[str | None] = mapped_column(String(32))

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ..db import db_session, now_iso
 from ..models import (
@@ -20,8 +20,8 @@ from ..models import (
     Task,
     TaskQueue,
 )
-from ..settings import settings
 from ..router.health import summarize
+from ..settings import settings
 
 
 def _since(hours: int) -> str:
@@ -53,6 +53,10 @@ def overview() -> dict:
         pin_row = s.get(SystemState, "engine_pin")
         policy_row = s.get(SystemState, "engine_policy")
         engine_pin = pin_row.value if pin_row else settings.engine_pin
+        # 不变式 I6：`needs_reconcile=1` 的行必须能被发现（不受 24h 窗口限制）
+        needs_reconcile = int(
+            s.scalar(select(func.count()).select_from(CallLog).where(CallLog.needs_reconcile == 1)) or 0
+        )
 
     published = [c for c in caps if c.status == "published"]
     draft = [c for c in caps if c.status == "draft"]
@@ -159,6 +163,16 @@ def overview() -> dict:
                 "target": "/tasks?status=unknown",
             }
         )
+    if needs_reconcile:
+        attention.append(
+            {
+                "code": "CALL_NEEDS_RECONCILE",
+                "severity": "warning",
+                "title": f"{needs_reconcile} 次调用无法判定上游是否受理，需对账",
+                "target": "/calls?needs_reconcile=1",
+                "href": "/calls?needs_reconcile=1",
+            }
+        )
     for provider in providers:
         has = any(c.provider_id == provider.id and c.status == "active" for c in creds)
         if not has:
@@ -191,6 +205,7 @@ def overview() -> dict:
         },
         "success_rate_24h": round(ok_calls / len(calls), 4) if calls else None,
         "calls_24h": len(calls),
+        "needs_reconcile": needs_reconcile,
         "latency": {"p50_ms": p50, "p95_ms": p95},
         "failed_tasks": len(tasks_failed),
         "queue_depth": queue_depth,

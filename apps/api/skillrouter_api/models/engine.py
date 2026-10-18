@@ -50,6 +50,10 @@ class EngineUpgradeRun(Base, IdMixin):
     started_at: Mapped[str] = mapped_column(String(32), nullable=False)
     finished_at: Mapped[str | None] = mapped_column(String(32))
     result: Mapped[str | None] = mapped_column(String(16))
+    #: 候选验证结论 `passed | blocked | failed`；与 `result`（运行怎么结束）语义分离
+    verify_status: Mapped[str | None] = mapped_column(String(16))
+    #: 未通过/未验证的检查项（JSON 数组），UI 的「阻断原因」直接读它
+    blocked_reasons: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     steps: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     backup_file_id: Mapped[str | None] = mapped_column(String(64))

@@ -8,7 +8,7 @@ from ..db import db_session, db_write, now_iso, uuid_pk
 from ..errors import ApiError, Code
 from ..models import Capability, CapabilityRoute, Credential, Provider
 from ..schemas.common import paginate, sort_items
-from . import audit
+from . import audit, credentials
 
 CATEGORIES = ("llm", "image", "video", "speech", "asr", "generic")
 
@@ -98,20 +98,8 @@ def get_provider(provider_id: str) -> dict:
         )
         routes = list(s.scalars(select(CapabilityRoute).where(CapabilityRoute.provider_id == provider_id)))
         caps = {c.id: c for c in s.scalars(select(Capability)).all()}
-        data["credentials"] = [
-            {
-                "id": c.id,
-                "name": c.name,
-                "kind": c.kind,
-                "auth_type": c.auth_type,
-                "status": c.status,
-                "secret_mask": c.secret_mask,
-                "expires_at": c.expires_at,
-                "last_verified_at": c.last_verified_at,
-                "last_verify_ok": c.last_verify_ok,
-            }
-            for c in creds
-        ]
+        # 凭证摘要复用 credentials 的同一投影（字段名一致，不留两套；§A.3.2 / §A.5.2）
+        data["credentials"] = [credentials.summarize(c) for c in creds]
         data["capabilities"] = [
             {
                 "id": r.capability_id,

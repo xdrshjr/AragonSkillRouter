@@ -15,11 +15,11 @@ on:
   workflow_dispatch:
     inputs:
       run_e2e:
-        description: '是否运行 Playwright e2e（需要可用的本地栈）'
+        description: '已废弃：总开关改为仓库变量 E2E_ENABLED=1（保留此项只为不让旧调用报错）'
         type: boolean
         default: false
       e2e_base_url:
-        description: 'e2e 目标地址（例如 http://127.0.0.1:3000；留空则跳过）'
+        description: 'e2e 目标地址（例如 http://127.0.0.1:3000）；留空则用仓库变量 E2E_BASE_URL'
         type: string
         default: ''
 
@@ -42,6 +42,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: ci.yml 可解析 + entrypoint 语法（F-20 / §A.3.12）
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install pyyaml
+          python -c "import yaml,io;yaml.safe_load(io.open('.github/workflows/ci.yml',encoding='utf-8'))"
+          echo "ci.yml 可被 YAML 解析 ✓"
+          bash -n deploy/entrypoint.api.sh
+          echo "entrypoint.api.sh 语法通过 ✓"
+      - name: entrypoint 必须支持 run 角色（F-22）
+        run: |
+          set -e
+          # 光有字符串不够：run) 必须存在、且排在 api) 之前，否则一次性命令会被当成角色名。
+          python - <<'PY'
+          import sys
+          src = open('deploy/entrypoint.api.sh', encoding='utf-8').read()
+          if 'run)' not in src:
+              print('::error::entrypoint.api.sh 缺少 run) 分支（§A.3.12 / F-22）')
+              sys.exit(1)
+          if src.index('run)') > src.index('api)'):
+              print('::error::run) 分支必须写在 api) 之前，否则不会被优先命中')
+              sys.exit(1)
+          if 'entrypoint.api.sh api|worker|run' not in src:
+              print('::error::用法文案未更新为 api|worker|run')
+              sys.exit(1)
+          print('entrypoint.api.sh run 角色 ✓')
+          PY
       - name: 语法检查（compileall，不 import）
         run: python -m compileall -q scripts
       - name: 标准库约束自检（备份/恢复不得出现 sqlite3 CLI 或 tar）
@@ -120,6 +147,32 @@ jobs:
             echo "::notice::OpenAPI 导出失败（可能需要主密钥/数据库等运行期依赖），跳过漂移检查"
             tail -n 5 /tmp/openapi.err || true
           fi
+
+  # ── 迁移：upgrade → downgrade base → upgrade → 再 upgrade（幂等）（F-21 / R2-02）──
+  # 为什么单列一个作业：迁移通常只在首次部署跑一次，等到真要回滚才发现跑不通。
+  # 第 4 条 `upgrade head` 是幂等性证据（第二次必须同样 0 退出），不许省。
+  # 手动等价（在 apps/api 下，CI 里显式用 -c 指向 migrations/alembic.ini）：
+  #   python -m alembic upgrade head → downgrade base → alembic upgrade head（两次）
+  migrations:
+    name: migrations (py3.11)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    env:
+      SKILLROUTER_ENV: development
+      SKILLROUTER_DATA_DIR: ${{ runner.temp }}/sr-data
+      SKILLROUTER_DB_PATH: ${{ runner.temp }}/sr-data/mig.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11', cache: pip }
+      - run: pip install -r requirements-dev.txt
+      - run: python -m alembic -c migrations/alembic.ini upgrade head
+      - run: python -m alembic -c migrations/alembic.ini downgrade base
+      - run: python -m alembic -c migrations/alembic.ini upgrade head
+      - run: python -m alembic -c migrations/alembic.ini upgrade head   # 幂等：第二次必须也是 0 退出
+      - run: python -m pytest tests/test_api_contract.py tests/test_auth_flow.py -q
 
   # ── 网关：tsc + vitest（含冻结导出/事件/工具的一致性套件）──────────────────
   gateway:
@@ -260,19 +313,22 @@ jobs:
           fi
           echo ".env.example 无真实密钥 ✓"
 
-  # ── e2e（可选；默认不跑。需要一个已经起好的栈，本工作流不负责起栈）──────────
-  # 为什么不在 CI 里起栈：e2e 会连真实 api/web/gateway，而起栈需要主密钥、管理员初始化、
-  # 引擎依赖，且耗时远超 PR 门禁的合理范围（§15.1 把 e2e 列为「CI 可选」）。
-  # 由有栈的人手动 dispatch 并传入 e2e_base_url。
+  # ── e2e（可选；默认不跑，开关是仓库变量 `E2E_ENABLED=1`）（F-20）────────────
+  # 为什么默认关：e2e 要连真实 api（主密钥、管理员初始化、引擎依赖），耗时远超 PR 门禁的合理范围
+  # （§15.1 把 e2e 列为「CI 可选」）。开启后本作业会**自己** `npm run build` + `npm run start`
+  # 起前端，再跑 playwright；api 侧仍需外部提供（`vars.E2E_BASE_URL` 或下面的 127.0.0.1 回退）。
+  # 「跳过」必须显式喊出来：否则看 PR 的人会把「没跑」当成「过了」。
   e2e:
     name: e2e (optional)
-    if: github.event_name == 'workflow_dispatch' && inputs.run_e2e && inputs.e2e_base_url != ''
+    if: vars.E2E_ENABLED == '1'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: apps/web
     env:
-      E2E_BASE_URL: ${{ inputs.e2e_base_url }}
+      # SR_BASE_URL 是本项目脚本读的名字；E2E_BASE_URL 保留给 playwright 配置，两者同值双写。
+      SR_BASE_URL: ${{ vars.E2E_BASE_URL }}
+      E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -284,10 +340,46 @@ jobs:
         run: npm ci --include=dev --no-audit --no-fund
       - name: 安装浏览器
         run: npx playwright install --with-deps chromium
-      - name: 确认目标可达（不可达就明确失败，而不是让 e2e 报一堆超时）
+      - name: npm run build（standalone 产物，playwright 之前必须构建完）
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+          SKILLROUTER_API_URL: ${{ vars.SKILLROUTER_API_URL != '' && vars.SKILLROUTER_API_URL || 'http://127.0.0.1:8000' }}
+        run: npm run build
+      - name: 起前端（npm run start）并确认目标可达
         run: |
           set -e
-          curl -fsS "${E2E_BASE_URL}/api/health" > /dev/null || {
-            echo "::error::${E2E_BASE_URL}/api/health 不可达，e2e 需要预先起好的栈"; exit 1; }
+          # 没给外部基址时回退到本机起的前端；给了就以外部位为准（跳过本地 start 的等待）。
+          BASE="${SR_BASE_URL:-http://127.0.0.1:3000}"
+          if [ -z "${SR_BASE_URL}" ]; then
+            nohup npm run start > /tmp/web.log 2>&1 &
+            for _ in $(seq 1 60); do
+              if curl -fsS "${BASE}/api/health" > /dev/null 2>&1; then break; fi
+              sleep 2
+            done
+            tail -n 20 /tmp/web.log || true
+          fi
+          curl -fsS "${BASE}/api/health" > /dev/null || {
+            echo "::error::${BASE}/api/health 不可达：api 未起或 E2E_BASE_URL 指错（e2e 不是纯前端测试）"
+            exit 1
+          }
+          # 双写：SR_BASE_URL 给脚本，E2E_BASE_URL 给 playwright 配置
+          echo "SR_BASE_URL=${BASE}" >> "$GITHUB_ENV"
+          echo "E2E_BASE_URL=${BASE}" >> "$GITHUB_ENV"
       - name: playwright
         run: npx playwright test
+
+  # ── e2e 未开启时的显式告警（`if: vars.E2E_ENABLED == '1'` 为假时作业整块跳过，
+  #    连一行日志都不留；用一个反向条件的轻量作业把「没验证」这件事写在流水线上）──
+  e2e-skipped:
+    name: e2e skipped (not verified)
+    if: vars.E2E_ENABLED != '1'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "::warning::e2e skipped ≠ verified；P10 仍待验证"
+      - run: |
+          {
+            echo "### e2e 未运行（跳过 ≠ 通过）"
+            echo ""
+            echo "- 要跑：把仓库变量 \`E2E_ENABLED\` 设为 \`1\`（并给 \`E2E_BASE_URL\` 指向已起好的 api）"
+            echo "- 状态口径：见 docs/runbook/verification-checklist.md（P10 仍待验证）"
+          } >> "$GITHUB_STEP_SUMMARY"

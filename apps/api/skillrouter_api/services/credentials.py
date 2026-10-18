@@ -1,8 +1,19 @@
-"""凭证服务：加密落库、掩码、影响面、替换/轮换、凭证代理（§7.5 / §11.2）。"""
+"""凭证服务：加密落库、掩码、影响面、替换/轮换、凭证代理（§7.5 / §11.2 / §A.3.2）。
+
+投影纪律（F-03 / §A.3.2）：`GET /credentials*`、`GET /providers/{id}` 的凭证摘要、
+`/impact` 三个投影**只允许**出现 `_PUBLIC_META_KEYS` 里的键；`meta` 原样返回 JSON 列
+视为缺陷。命中 `_SENSITIVE_META` 的 meta 键在**写路径**被摘出来信封加密进
+`meta_sealed`（AAD `record_type="credential_meta"`），因此库里不再有敏感键
+（不变式 I4）。服务端真正要读原始 meta 的地方（`materialize()`、`executors/auth.py`、
+`services/credentials_verify.py`）不走投影。
+"""
 
 from __future__ import annotations
 
 import hashlib
+import json
+import re
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import desc, select
 
@@ -21,10 +32,113 @@ from ..models import (
 from ..schemas.common import paginate, sort_items
 from . import audit
 
+#: `status=expiring` 的窗口：`expires_at` 非空且 ≤7 天（§A.3.11）
+EXPIRING_DAYS = 7
+
 log = get_logger("skillrouter.run")
 
 KINDS = ("llm", "image", "video", "speech", "asr", "generic")
 AUTH_TYPES = ("api_key", "bearer", "basic", "header")
+
+#: 白名单 = 仓库里真实写入/读取的键 + 明确预留的键；新增键必须同时改 spec §A.3.2
+_PUBLIC_META_KEYS = (
+    "provider_slug",     # api/v1/callbacks.py 按它找凭证
+    "probe_path",        # services/credentials_verify.py
+    "probe_method",      # services/credentials_verify.py
+    "header_name",       # executors/auth.py
+    "username",          # executors/auth.py（basic 认证用户名，非密钥）
+    "mock",              # scripts/seed_demo.py（演示数据标记）
+    "model", "region", "notes", "base_url_hint",   # 预留：UI 未来可填，当前无人写
+)
+
+#: 命中即视为敏感键：写路径密封进 `meta_sealed`，投影里不出现
+_SENSITIVE_META = re.compile(r"(?i)(secret|token|passw|signature|webhook|api[_-]?key|private)")
+#: 公开别名（`scripts/migrate_seal_meta.py` 与测试复用同一份判据，避免出现第二套正则）
+SENSITIVE_META = _SENSITIVE_META
+
+#: `meta_sealed` 的 AAD 固定值（与 `crypto/secretbox.py` 顶部登记表一致）
+_META_RECORD_TYPE = "credential_meta"
+
+
+def _partition_meta(meta: dict | None) -> tuple[dict, dict]:
+    """按 `_SENSITIVE_META` 把 meta 分成（可明文存储, 需密封）两份。
+
+    `probe_path` / `probe_method` / `header_name` / `username` / `mock` 都不命中
+    正则，因此不会被密封（密封它们会让探测与认证直接失效）。
+    """
+    public: dict = {}
+    sensitive: dict = {}
+    for key, value in (meta or {}).items():
+        name = str(key)
+        (sensitive if _SENSITIVE_META.search(name) else public)[name] = value
+    return public, sensitive
+
+
+def _seal_meta(credential_id: str, mapping: dict) -> str:
+    payload = json.dumps(mapping, ensure_ascii=False, sort_keys=True)
+    return secretbox.seal(payload, record_type=_META_RECORD_TYPE, record_id=credential_id)
+
+
+def _merge_sealed_meta(existing: str | None, credential_id: str, incoming: dict) -> str | None:
+    """把新的敏感键并进已有密文（值为 `None` 视为删除）。"""
+    merged: dict = {}
+    if existing:
+        try:
+            loaded = json.loads(
+                secretbox.open_sealed(existing, record_type=_META_RECORD_TYPE, record_id=credential_id)
+            )
+            if isinstance(loaded, dict):
+                merged.update(loaded)
+        except Exception as exc:  # noqa: BLE001 - 打不开就只保留新值，不阻断写入
+            log.warning("meta_sealed_unreadable", extra={"object": credential_id, "detail": redact(str(exc))})
+    merged.update(incoming)
+    kept = {k: v for k, v in merged.items() if v is not None}
+    return _seal_meta(credential_id, kept) if kept else None
+
+
+def _sealed_meta(row: Credential) -> dict:
+    """解封 `meta_sealed`（仅回调验签/轮换使用；投影只取键名）。"""
+    sealed = getattr(row, "meta_sealed", None)
+    if not sealed:
+        return {}
+    try:
+        loaded = json.loads(
+            secretbox.open_sealed(sealed, record_type=_META_RECORD_TYPE, record_id=row.id)
+        )
+    except Exception as exc:  # noqa: BLE001 - 旧密钥缺失时不能拖垮整个列表
+        log.warning("meta_sealed_unreadable", extra={"object": row.id, "detail": redact(str(exc))})
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def sealed_meta_of(row: Credential) -> dict:
+    """对外暴露的解封入口（`api/v1/callbacks.py` 的验签回落用）。"""
+    return _sealed_meta(row)
+
+
+def migrate_meta(credential_id: str, meta: dict, existing_sealed: str | None) -> tuple[dict, str | None]:
+    """回填用入口（幂等）：把 meta 里的敏感键密封，返回（可明文的 meta, 新密文）。
+
+    `scripts/migrate_seal_meta.py` 与写路径共用同一实现，避免出现第二套密封逻辑。
+    """
+    public_meta, sensitive_meta = _partition_meta(meta)
+    if not sensitive_meta:
+        return public_meta, existing_sealed
+    return public_meta, _merge_sealed_meta(existing_sealed, credential_id, sensitive_meta)
+
+
+def _public_meta(meta: dict | None) -> dict:
+    """白名单投影：只回 `_PUBLIC_META_KEYS` 里的键；被剔除的键名交给 `meta_redacted_keys`。"""
+    data = meta or {}
+    return {key: value for key, value in data.items() if key in _PUBLIC_META_KEYS}
+
+
+def _meta_redacted_keys(row: Credential) -> list[str]:
+    """被投影剔除的键名（白名单外的现存键 + 已密封的键）。"""
+    meta = row.meta or {}
+    keys = {key for key in meta if key not in _PUBLIC_META_KEYS}
+    keys |= set(_sealed_meta(row))
+    return sorted(keys)
 
 
 def _brief(row: Credential) -> dict:
@@ -35,8 +149,13 @@ def _brief(row: Credential) -> dict:
         "kind": row.kind,
         "auth_type": row.auth_type,
         "header_name": row.header_name,
+        "secret_mask": row.secret_mask,
+        "secret_fingerprint": row.secret_fingerprint,
+        # 兼容旧响应形状（前端已迁移到 secret_mask，保留一版以免连接包/脚本报错）
         "secret": {"masked": row.secret_mask},
-        "meta": row.meta or {},
+        "meta": _public_meta(row.meta),
+        "meta_redacted_keys": _meta_redacted_keys(row),
+        "meta_sealed": bool(row.meta_sealed),
         "status": row.status,
         "expires_at": row.expires_at,
         "last_verified_at": row.last_verified_at,
@@ -45,6 +164,11 @@ def _brief(row: Credential) -> dict:
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
+
+
+def summarize(row: Credential) -> dict:
+    """凭证摘要投影（`services/providers.py` 详情复用同一字段集，不留两套字段名）。"""
+    return _brief(row)
 
 
 def list_credentials(
@@ -69,9 +193,22 @@ def list_credentials(
         data["provider_name"] = names.get(row.provider_id, "")
         items.append(data)
     if q:
+        # `q` 覆盖 name / kind / provider_name（§A.3.11）；`provider_name` 来自上一步的 JOIN 结果
         needle = q.lower()
-        items = [i for i in items if needle in i["name"].lower()]
-    if status:
+        items = [
+            i
+            for i in items
+            if needle in str(i.get("name") or "").lower()
+            or needle in str(i.get("kind") or "").lower()
+            or needle in str(i.get("provider_name") or "").lower()
+        ]
+    if status == "expiring":
+        # 「即将过期」= `expires_at` 非空且 ≤ EXPIRING_DAYS 天（§A.3.11）
+        horizon = (
+            datetime.now(timezone.utc) + timedelta(days=EXPIRING_DAYS)
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        items = [i for i in items if i.get("expires_at") and i["expires_at"] <= horizon]
+    elif status:
         items = [i for i in items if i["status"] == status]
     if kind:
         items = [i for i in items if i["kind"] == kind]
@@ -122,6 +259,8 @@ def create_credential(provider_id: str, data: dict, *, actor: str | None = None)
     credential_id = uuid_pk("crd")
     secret = data["secret"]
     ciphertext = secretbox.seal(secret, record_type="credential", record_id=credential_id)
+    public_meta, sensitive_meta = _partition_meta(data.get("meta"))
+    meta_sealed = _seal_meta(credential_id, sensitive_meta) if sensitive_meta else None
     with db_write() as s:
         provider = s.get(Provider, provider_id)
         if provider is None or provider.deleted_at:
@@ -137,7 +276,8 @@ def create_credential(provider_id: str, data: dict, *, actor: str | None = None)
                 secret_ciphertext=ciphertext,
                 secret_mask=mask_secret(secret),
                 secret_fingerprint=hashlib.sha256(secret.encode()).hexdigest()[:12],
-                meta=data.get("meta") or {},
+                meta=public_meta,
+                meta_sealed=meta_sealed,
                 status="active",
                 expires_at=data.get("expires_at"),
                 created_at=now_iso(),
@@ -159,9 +299,15 @@ def update_credential(credential_id: str, patch: dict, *, actor: str | None = No
         row = s.get(Credential, credential_id)
         if row is None or row.deleted_at:
             raise ApiError(Code.NOT_FOUND, "凭证不存在")
-        for key in ("name", "kind", "auth_type", "header_name", "meta", "expires_at", "status"):
+        for key in ("name", "kind", "auth_type", "header_name", "expires_at", "status"):
             if key in patch and patch[key] is not None:
                 setattr(row, key, patch[key])
+        if patch.get("meta") is not None:
+            # 写路径即收口：敏感键进 meta_sealed，meta 只留白名单可见的明文键（I4）
+            public_meta, sensitive_meta = _partition_meta(patch["meta"])
+            row.meta = {**(row.meta or {}), **public_meta}
+            if sensitive_meta:
+                row.meta_sealed = _merge_sealed_meta(row.meta_sealed, row.id, sensitive_meta)
         row.updated_at = now_iso()
     return get_credential(credential_id)
 
@@ -215,6 +361,20 @@ def rotate(credential_id: str, secret: str, *, name: str | None = None, actor: s
         old = s.get(Credential, credential_id)
         if old is None or old.deleted_at:
             raise ApiError(Code.NOT_FOUND, "凭证不存在")
+        # 敏感 meta 的 AAD 里带 record_id：换行必须用新 id 重新密封（否则新行打不开）
+        public_meta, legacy_sensitive = _partition_meta(old.meta)
+        sealed_source = old.meta_sealed
+        if legacy_sensitive:
+            sealed_source = _merge_sealed_meta(sealed_source, old.id, legacy_sensitive)
+        sealed_for_new = (
+            secretbox.seal(
+                secretbox.open_sealed(sealed_source, record_type=_META_RECORD_TYPE, record_id=old.id),
+                record_type=_META_RECORD_TYPE,
+                record_id=new_id,
+            )
+            if sealed_source
+            else None
+        )
         s.add(
             Credential(
                 id=new_id,
@@ -226,7 +386,8 @@ def rotate(credential_id: str, secret: str, *, name: str | None = None, actor: s
                 secret_ciphertext=ciphertext,
                 secret_mask=mask_secret(secret),
                 secret_fingerprint=hashlib.sha256(secret.encode()).hexdigest()[:12],
-                meta=old.meta or {},
+                meta=public_meta,
+                meta_sealed=sealed_for_new,
                 status="active",
                 expires_at=old.expires_at,
                 rotation_of=old.id,
@@ -434,5 +595,9 @@ __all__ = [
     "record_verification",
     "verification_history",
     "expiring_within",
+    "summarize",
+    "sealed_meta_of",
+    "migrate_meta",
+    "SENSITIVE_META",
     "log",
 ]

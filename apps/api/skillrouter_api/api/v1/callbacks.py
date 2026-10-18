@@ -14,6 +14,7 @@ from ...db import db_session, db_write, now_iso, uuid_pk
 from ...errors import ApiError, Code
 from ...logging import get_logger, redact
 from ...models import CallbackEvent, Credential
+from ...services import credentials
 from ...settings import settings
 
 router = APIRouter(tags=["v1-callbacks"])
@@ -44,7 +45,7 @@ async def callback(provider_slug: str, request: Request) -> dict:
         raise ApiError(
             Code.NOT_FOUND,
             message=f"提供商 {provider_slug} 未配置 webhook_secret",
-            hint="在凭证 meta.webhook_secret 中配置共享密钥",
+            hint="在凭证 meta 里配置 webhook_secret（写入时自动信封加密，不回显明文）",
         )
     expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, signature.replace("sha256=", "")):
@@ -90,11 +91,22 @@ async def callback(provider_slug: str, request: Request) -> dict:
 
 
 def _webhook_secret(provider_slug: str) -> str | None:
+    """共享密钥：先解密 `meta_sealed`，再回落旧 `meta['webhook_secret']`（§A.3.2-4）。
+
+    回落分支只为尚未跑 `scripts/migrate_seal_meta.py` 的存量库保留，命中时记
+    `deprecated_meta_secret` 告警；回填完成后这条分支可以删掉。
+    """
     with db_session() as s:
         rows = list(s.scalars(select(Credential).where(Credential.deleted_at.is_(None))))
         for row in rows:
             meta = row.meta or {}
-            if meta.get("provider_slug") == provider_slug and meta.get("webhook_secret"):
+            if meta.get("provider_slug") != provider_slug:
+                continue
+            sealed = credentials.sealed_meta_of(row)
+            if sealed.get("webhook_secret"):
+                return str(sealed["webhook_secret"])
+            if meta.get("webhook_secret"):
+                log.warning("deprecated_meta_secret", extra={"object": row.id, "detail": {"key": "webhook_secret"}})
                 return str(meta["webhook_secret"])
     return None
 

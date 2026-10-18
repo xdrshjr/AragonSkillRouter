@@ -60,13 +60,18 @@ def test_me_returns_engine_summary(client, admin) -> None:
 def test_session_expiry_and_revocation(client, admin) -> None:
     from datetime import datetime, timedelta, timezone
 
-    from sqlalchemy import select
+    from sqlalchemy import select, text
 
     from skillrouter_api.db import db_write
     from skillrouter_api.models import AdminSession
 
     with db_write() as s:
-        row = s.scalar(select(AdminSession).order_by(AdminSession.created_at.desc()))
+        # 只过期「当前客户端」的会话：`created_at` 只有秒级精度，多个用例在同一秒登录时
+        # 单按 created_at 排序会取到别人的会话（断言随之变成 flaky）。rowid 单调递增，
+        # 作为二级排序即可稳定命中最后插入的那一行。
+        row = s.scalar(
+            select(AdminSession).order_by(AdminSession.created_at.desc(), text("rowid DESC"))
+        )
         past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
         row.expires_at = past
     r = client.get("/api/admin/overview")

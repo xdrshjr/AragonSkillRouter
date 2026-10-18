@@ -17,11 +17,12 @@ log = get_logger("skillrouter.run")
 
 async def rollback_to(version: str, *, reason: str = "", actor: str | None = None) -> dict:
     adapter = get_adapter()
+    engine_home = str(settings.engine_home_root / version)
     try:
-        reload_result = await adapter.reload_engine(version)
+        reload_result = await adapter.reload_engine(version, engine_home=engine_home)
     except Exception as exc:  # noqa: BLE001
         reload_result = {"ok": False, "stage": "reload", "detail": redact(str(exc), max_len=300)}
-    write_pointer(version)
+    write_pointer(version, engine_home=engine_home)
     health = await health_check(version)
     ok = bool(reload_result.get("ok")) and health.get("ok", False)
     with db_write() as s:
@@ -30,9 +31,18 @@ async def rollback_to(version: str, *, reason: str = "", actor: str | None = Non
                 row.status = "active"
             elif row.status == "active" and row.version != version:
                 row.status = "rolled_back"
-        from_pin = get_state(s, "engine_previous_pin", "")
-        set_state(s, "engine_pin", from_pin or f"{version}@")
-        set_state(s, "engine_previous_pin", "")
+        # `engine_pin` 必须描述**回滚目标**：写 `engine_previous_pin` 会让 db 里的 pin
+        # 与实际运行的版本分叉（指针是 version、pin 是更早的 P-1 → pin_source 报 env、
+        # 下一次升级的基线也错），并留下一个裸 `@`。
+        outgoing = get_state(s, "engine_pin", settings.engine_pin)
+        commit = s.scalar(
+            select(EngineDeployment.commit_sha)
+            .where(EngineDeployment.version == version)
+            .order_by(EngineDeployment.deployed_at.desc())
+        )
+        set_state(s, "engine_pin", f"{version}@{commit}" if commit else version)
+        # 回滚也是一次切换：记下被替换的版本，留出反向回滚的余地
+        set_state(s, "engine_previous_pin", outgoing if outgoing and outgoing != version else "")
     from ..services import audit
 
     audit.write(

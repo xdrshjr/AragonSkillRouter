@@ -113,8 +113,12 @@ export function TestPanel({
           </p>
         </div>
         {result ? (
-          <Badge tone={result.ok ? 'ok' : 'danger'} dot>
-            {result.ok ? '测试通过' : '测试未通过'}
+          <Badge tone={result.status === 'succeeded' ? 'ok' : result.status === 'failed' ? 'danger' : 'warn'} dot>
+            {result.status === 'succeeded'
+              ? '测试通过'
+              : result.status === 'failed'
+                ? '测试未通过'
+                : '结果不确定'}
           </Badge>
         ) : null}
       </header>
@@ -217,11 +221,48 @@ export function TestPanel({
             </div>
             <div>
               <dt className="text-content-muted">实际 route</dt>
-              <dd className="truncate text-content">
-                {result.route?.provider_name ?? result.route?.id ?? '—'}
+              <dd className="truncate text-content" title={result.used_route?.route_id ?? undefined}>
+                {result.used_route?.route_id ?? '—'}
               </dd>
             </div>
+            <div>
+              <dt className="text-content-muted">提供商</dt>
+              <dd className="truncate text-content" title={result.used_route?.provider_id ?? undefined}>
+                {result.used_route?.provider_id ?? '—'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-content-muted">凭证</dt>
+              <dd className="truncate text-content" title={result.used_route?.credential_id ?? undefined}>
+                {result.used_route?.credential_id ?? '—'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-content-muted">测试记录</dt>
+              <dd className="truncate sr-mono text-content">{result.test_run_id}</dd>
+            </div>
+            <div>
+              <dt className="text-content-muted">未选中 route</dt>
+              <dd className="text-content">{result.dropped.length}</dd>
+            </div>
           </dl>
+          {/* 未选中的候选与被丢弃的原因：路由决策要可解释，不能只说「失败了」 */}
+          {result.dropped.length > 0 ? (
+            <details>
+              <summary className="cursor-pointer text-12 text-content-muted">
+                未选中的 route（{result.dropped.length}）
+              </summary>
+              <ul className="mt-1 flex flex-col gap-0.5 text-12">
+                {result.dropped.map((item) => (
+                  <li key={item.route_id} className="flex flex-wrap items-center gap-1.5">
+                    <code className="sr-mono text-content">{item.route_id}</code>
+                    <Badge tone="neutral">未选中</Badge>
+                    <span className="text-content-muted">原因 {item.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
           {result.error ? (
             <div className="rounded border border-danger bg-[var(--sr-danger-weak)] px-2 py-1.5">
               <p className="text-12 text-content">
@@ -239,6 +280,14 @@ export function TestPanel({
               {result.response_preview ?? '（无响应体）'}
             </pre>
           </div>
+          {result.output && typeof result.output === 'object' ? (
+            <details>
+              <summary className="cursor-pointer text-12 text-content-muted">解析后输出（output）</summary>
+              <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--sr-surface-sunken)] p-2 text-12 sr-mono sr-scroll">
+                {prettyJson(result.output, 4000)}
+              </pre>
+            </details>
+          ) : null}
           <p className="text-12 text-content-muted">
             测试通过 ≠ 已发布：发布还需版本号、变更说明与 24h 内的测试证据。
           </p>

@@ -41,6 +41,20 @@ COPY agents/aragon-gateway/package.json agents/aragon-gateway/package-lock.json 
 RUN npm ci --omit=dev --no-audit --no-fund \
     && npm cache clean --force
 COPY --from=build /app/dist ./dist
+# 校验脚本必须进镜像（§A.3.7-1 / R2-01）：`/internal/admin/verify-artifact` 靠它
+# 读出候选产物的导出符号与事件名。缺了它，「导出清单兼容」「事件映射契约」两项恒 blocked，
+# 于是 policy=auto 永远不生效 —— 正是本轮要消灭的「假绿/永阻塞」。
+COPY scripts/verify_artifact.mjs ./scripts/verify_artifact.mjs
+ENV AGENT_VERIFY_ARTIFACT_SCRIPT=/app/scripts/verify_artifact.mjs
+
+# ── 隔离构建工具链（§A.3.7-0 / R2-01）────────────────────────────────────────
+# 引擎的隔离构建与产物验证（`git clone` → `npm ci` → `npm run build`、node 脚本验符号）
+# 跑在本容器里，由 api 侧 `SKILLROUTER_ENGINE_TOOLCHAIN=gateway`（生产默认）编排调用。
+# `node`/`npm` 已由基础镜像提供，缺的是 `git`；不装它等于「每次升级都判 blocked」。
+# api/worker 镜像刻意**不**装 node/git（保持最小攻击面），Python 侧只做编排。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 
 # 非 root（node 用户 uid/gid = 1000），与 api/web 统一，共享 /data 卷才不会互相写不进去。
 # 网关只会写 /data：策略文件、按版本隔离的引擎 home、会话缓存。

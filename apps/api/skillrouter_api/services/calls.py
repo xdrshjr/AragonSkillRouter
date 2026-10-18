@@ -1,4 +1,4 @@
-"""调用记录查询与详情（§7.10 / §9.2）。"""
+"""调用记录查询与详情（§7.10 / §9.2 / §A.3.11）。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,13 @@ from ..errors import ApiError, Code
 from ..models import CallLog, Task
 from ..schemas.common import paginate
 from ..settings import settings
+
+#: `sort` 白名单（§A.3.11 `GET /api/admin/calls`）；`duration_ms` 是外部字段名，落库叫 `latency_ms`
+SORT_FIELDS = {
+    "created_at": "created_at",
+    "duration_ms": "latency_ms",
+    "status": "status",
+}
 
 
 def _brief(row: CallLog) -> dict:
@@ -26,12 +33,37 @@ def _brief(row: CallLog) -> dict:
         "http_status": row.http_status,
         "error_code": row.error_code,
         "latency_ms": row.latency_ms,
+        "duration_ms": row.latency_ms,
         "queue_ms": row.queue_ms,
         "upstream_ms": row.upstream_ms,
         "retries": row.retries,
+        "needs_reconcile": bool(row.needs_reconcile),
         "task_id": row.task_id,
         "created_at": row.created_at,
     }
+
+
+def _sort_items(items: list[dict], sort: str | None) -> list[dict]:
+    """`sort` 白名单校验 + 多键排序（`-` 前缀降序，越界 → 400 `VALIDATION_FAILED`）。"""
+    raw = (sort or "-created_at").strip()
+    tokens = [part.strip() for part in raw.split(",") if part.strip()]
+    keys: list[tuple[str, bool]] = []
+    for token in tokens:
+        field = token.lstrip("-+")
+        if field not in SORT_FIELDS:
+            raise ApiError(
+                Code.VALIDATION_FAILED,
+                message=f"不支持的排序字段：{field}",
+                details={"allowed": sorted(SORT_FIELDS)},
+            )
+        keys.append((SORT_FIELDS[field], token.startswith("-")))
+    ordered = list(items)
+    for key, descending in reversed(keys):
+        ordered.sort(
+            key=lambda i, k=key: ((i.get(k) is None), i.get(k) if i.get(k) is not None else ""),
+            reverse=descending,
+        )
+    return ordered
 
 
 def list_calls(
@@ -44,6 +76,8 @@ def list_calls(
     date_from: str | None = None,
     date_to: str | None = None,
     min_latency: int | None = None,
+    needs_reconcile: bool | None = None,
+    sort: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
@@ -63,6 +97,8 @@ def list_calls(
             stmt = stmt.where(CallLog.created_at <= date_to)
         if min_latency is not None:
             stmt = stmt.where(CallLog.latency_ms >= min_latency)
+        if needs_reconcile is not None:
+            stmt = stmt.where(CallLog.needs_reconcile == (1 if needs_reconcile else 0))
         rows = list(s.scalars(stmt.limit(2000)))
     items = [_brief(r) for r in rows]
     if q:
@@ -70,10 +106,11 @@ def list_calls(
         items = [
             i
             for i in items
-            if needle in i["request_id"].lower()
+            if needle in (i["request_id"] or "").lower()
             or needle in (i["capability_key"] or "").lower()
-            or needle in (i["error_code"] or "").lower()
+            or needle in (i["caller_id"] or "").lower()
         ]
+    items = _sort_items(items, sort)
     return paginate(items, page, page_size)
 
 

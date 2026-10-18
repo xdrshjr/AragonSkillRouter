@@ -24,11 +24,19 @@ from skillrouter_api.settings import settings  # noqa: E402
 config = context.config
 if config.config_file_name is not None:
     try:
-        fileConfig(config.config_file_name)
+        # `disable_existing_loggers=False`：bootstrap 会在**进程内**调用 alembic，
+        # 默认的 True 会把已经创建的 `skillrouter.*` logger 全部 disable（日志静默）。
+        fileConfig(config.config_file_name, disable_existing_loggers=False)
     except Exception:  # pragma: no cover - 无日志配置时静默
         pass
 
-config.set_main_option("sqlalchemy.url", settings.db_url)
+# 目标库：`alembic.ini` 里的 `sqlalchemy.url` 是占位符（driver://user:pass@localhost/dbname），
+# **不能**当真；调用方（scripts/adopt_alembic.py 的 --db、bootstrap 的迁移入口）可以用上面这个
+# 选项显式指定目标库，否则回落到 settings.db_url（= SKILLROUTER_DB_PATH）。§A.3.8
+_url = (config.get_main_option("sqlalchemy.url") or "").strip()
+if not _url or _url.startswith("driver://"):
+    _url = settings.db_url
+config.set_main_option("sqlalchemy.url", _url)
 target_metadata = Base.metadata
 
 
@@ -42,7 +50,7 @@ def _configure(**kwargs) -> None:  # noqa: ANN003
 
 
 def run_migrations_offline() -> None:
-    _configure(url=settings.db_url, literal_binds=True, dialect_opts={"paramstyle": "named"})
+    _configure(url=_url, literal_binds=True, dialect_opts={"paramstyle": "named"})
     with context.begin_transaction():
         context.run_migrations()
 
@@ -50,7 +58,7 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     settings.ensure_dirs()
     engine = create_engine(
-        settings.db_url,
+        _url,
         poolclass=pool.NullPool,
         connect_args={"timeout": 5, "check_same_thread": False},
     )

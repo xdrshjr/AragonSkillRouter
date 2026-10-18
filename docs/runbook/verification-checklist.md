@@ -24,6 +24,30 @@
 | 外部 Agent 环境（AragonAgent / Claude Code 版本、OS） | 待填 |
 | 执行人 / 日期（UTC） | 待填 |
 
+## 0.1 需求条款 → 当前状态（spec §A.7.3 口径，唯一状态表）
+
+口径：**只有「已验证」允许写命令可复现的证据；其余一律「待验证 / 部分验证」并写阻塞原因。**
+具体数字（用例数、耗时、请求量）一律见
+[`verification-report.md`](verification-report.md) 的「迭代 2」章节——本文件不复述、不估算。
+
+| 需求条款 | 状态 | 证据（可复现命令） | 备注 |
+|---|---|---|---|
+| 凭证安全（不泄漏明文 / 掩码 / 指纹） | **已验证（本机）** | `cd apps/api && python -m pytest tests/test_credentials_projection.py tests/test_crypto_credentials.py tests/test_audit_redaction.py -q` | 本机测试环境；生产数据抽查仍见 §F 的 P13 |
+| 令牌安全（不在 URL、不进日志） | **已验证（本机）** | `cd apps/api && python -m pytest tests/test_token_transport.py -q` | 查询串通道默认关闭（`400 TOKEN_INVALID`）；逃生阀移除判据见 [troubleshooting.md](troubleshooting.md) §2.1 |
+| 费用与预算控制 | **部分验证（模拟上游）** | `cd apps/api && python -m pytest tests/test_budget_accounting.py -q` | 5 条全通过；与 `tests/test_tasks_recovery.py` 同批运行（正反两种顺序）同样通过——原先的 `global` 作用域跨用例干扰已改为**增量断言**修复（见 §F 的 P14）。真实厂商计价仍待验证 |
+| 重试与幂等 | **已验证（本机）** | `cd apps/api && python -m pytest tests/test_execution_sync_async_stream.py tests/test_platform_tokens.py -q` | 含同键同体复用、跨令牌隔离、`IDEMPOTENCY_IN_PROGRESS` |
+| 异步任务与恢复 / 取消语义 | **已验证（本机）** | `cd apps/api && python -m pytest tests/test_task_cancel_race.py tests/test_tasks_recovery.py tests/test_lease_ownership.py -q` | 含 `cancel_scope=pending_submit`（202）、`LEASE_LOST`、悬挂 `canceling` 收口 |
+| AragonAgent 升级可靠性 | **部分验证** | `cd apps/api && python -m pytest tests/test_engine_upgrade.py tests/test_upgrade_toolchain.py -q` | 脚本化流水线 + 三态验证 + 工具链归属已定；**真实候选版本升级/回滚仍待验证（P11）** |
+| 数据库迁移 | **已验证（本机）** | `cd apps/api && python -m pytest tests/test_migrations_roundtrip.py -q`；CI `migrations` 作业跑 `upgrade head → downgrade base → upgrade head → upgrade head` | 第 4 条 `upgrade head` 是幂等性证据；`0003` 回滚限制见 [backup-restore.md](backup-restore.md) §5.1 |
+| 文件签名访问 | **已验证（本机）** | `cd apps/api && python -m pytest tests/test_admin_files.py -q` | 上传响应与 `output_files[]` 都带 `signed_url`；无效/过期签名 `401`（不再是 404） |
+| 完整状态设计（维护 / 离线 / 无权限） | **部分验证** | `cd apps/api && python -m pytest tests/test_maintenance_mode.py -q` | 后端 `503 MAINTENANCE` 有测试；**前端横幅与 §A.7.3 的 8 项前端手测清单仍待验证** |
+| 真实联调三件套（文本 / 语音 / 异步，两个提供商） | **待验证（P1/P2/P3/P4）** | 见 §A1–§A4 | 缺真实凭证 |
+| 外部 Agent 全闭环 / MCP 实测 | **待验证（P5/P6）** | 见 §A5 / §A6 | 仅本机脚本与契约测试覆盖 |
+| 性能基线（4C8G） | **待验证（P8）** | 见 §C | 无目标硬件与 50 万行数据集 |
+
+> 自我加冕禁令：本节**不接受**「看起来能跑」的推断；写「部分验证」必须点名缺什么，
+> 写「已验证（本机）」必须给出上面这种一行可复制的命令。
+
 ## 1. 最小凭证清单
 
 真实联调至少要准备下面这些。**没有的项保持「待验证」，不要用 mock 顶替**。
@@ -127,7 +151,7 @@
 | 上游限流 | 按 `errors[]` 映射 `UPSTREAM_RATE_LIMIT`，backoff 重试至 `max_attempts` | 同上 | 待验证 |
 | 任务取消 | 上游支持 → `canceled`；不支持 → `409 CANCEL_UNSUPPORTED` + 「仅停止本地等待」 | `test_tasks_recovery.py` | 待验证 |
 | 服务重启 | worker 重启后过期租约被复位并重领；`running` 任务按 `resume_policy=check` 先查再定 | `test_tasks_recovery.py` | 待验证 |
-| 备份恢复 | 恢复后计数一致、能力可调用、凭证仍可解密 | `scripts/restore.py` 自检 + 手工抽查 | **部分**：脚本在 Windows + Python 3.11 上用合成库跑通（备份→删数据→恢复→行数自检通过；主密钥指纹不匹配时按预期拒绝，退出码 3）；**生产数据演练待验证** |
+| 备份恢复 | 恢复后计数一致、能力可调用、凭证仍可解密 | `scripts/restore.py` 自检 + 手工抽查 | **部分**：脚本在 Windows + Python 3.11 上用合成库跑通（备份→删数据→恢复→行数自检通过；主密钥指纹不匹配时按预期拒绝，退出码 3）；**生产数据演练待验证（P12）** |
 | 引擎升级失败 | 自动回滚到 previous，`engine_upgrade_runs.result=failed`，概览高优待办 | `test_engine_upgrade.py` | 待验证 |
 | 升级期间调用 | 已发布且非 `requires_agent_reasoning` 的能力成功率 100% | `test_engine_upgrade.py::test_calls_during_upgrade` | 待验证 |
 | 会话过期 | 管理接口 `401 SESSION_EXPIRED`，前端跳登录并说明 | `test_auth_flow.py` | 待验证 |
@@ -228,6 +252,23 @@ python scripts/perf_smoke.py \
 | P11 | 引擎升级真实演练（部署 + 回滚） | 未做真实候选版本升级 | [engine-upgrade.md](engine-upgrade.md) §2 | 待指派 | — |
 | P12 | 生产数据备份/恢复演练 | 只在合成库上验证过脚本 | [backup-restore.md](backup-restore.md) §7 | 待指派 | — |
 | P13 | 凭证解密抽查（恢复后） | 需要后端 AAD 约定才能自动核对 | 恢复后人工抽查 1 个凭证 + 1 个能力 | 待指派 | — |
+| P14 | 计费/并发的 `global` 作用域跨模块干扰 | **已修复**：`tests/test_budget_accounting.py::test_async_releases_concurrency_once` 原断言「五层并发绝对归零」，排在会留在途任务的用例之后会红（非产品缺陷，是断言写成绝对值）；改为「提交 +1 / 终态回基线 / 重复释放不变」的增量断言 | `cd apps/api && python -m pytest tests/test_tasks_recovery.py tests/test_budget_accounting.py -q` 与反向顺序均通过；全量 `python -m pytest tests -q` = 247 passed | 已闭环 | — |
+
+## F1. 待验证（评审新增，迭代 2）
+
+本轮**新增**的、尚无可复现证据的项。⚠️ 这些项**不得**被当作已验证：
+
+| 编号 | 项目 | 为什么还没验证 | 怎么验证（可复现命令） |
+|---|---|---|---|
+| R2-1 | CI `migrations` 作业真实跑通 | 本机只做了 YAML 解析断言；作业要等 CI 首次执行 | 推送后在 Actions 里看 `migrations (py3.11)`；本地等价：`cd apps/api && python -m alembic -c migrations/alembic.ini upgrade head && python -m alembic -c migrations/alembic.ini downgrade base && python -m alembic -c migrations/alembic.ini upgrade head && python -m alembic -c migrations/alembic.ini upgrade head` |
+| R2-2 | CI `e2e` 作业（`vars.E2E_ENABLED=1`） | 未开启仓库变量，跳过分支只会打 `::warning::e2e skipped ≠ verified；P10 仍待验证` | 仓库变量设 `E2E_ENABLED=1` + `E2E_BASE_URL` 指向已起好的栈 |
+| R2-3 | 前端 8 项手测清单（§A.7.3） | 需人工在浏览器点（能力详情刷新后发布可用、`canceling` note、备份按钮、引擎 `blocked` 二次确认、概览「待对账调用」……） | 见 spec §A.7.3 的 8 条，逐条截图存 `docs/runbook/evidence/<日期>/` |
+| R2-4 | 维护模式端到端（写请求 503 + UI 横幅） | 后端有 `test_maintenance_mode.py`；**UI 横幅与真实恢复过程未走一遍** | 手工 `touch <data>/.restore-in-progress` → `curl -X POST` 写接口应 503 → 页面顶部应显示「维护中」→ 删标记恢复 |
+| R2-5 | 网关加装 `git` 后镜像可构建 | 本机无 Docker，未构建过镜像 | `docker compose -f deploy/docker-compose.yml build gateway` 然后 `docker compose ... exec gateway git --version` |
+| R2-6 | `--entrypoint python` / `run` 角色在真实容器里生效 | 本机用 Git bash 直接跑脚本验证了三条路径（位置参数 `run`→exec 成功、`SKILLROUTER_ROLE=run`→exec 成功、`python` 作角色→`[FATAL] UNKNOWN_ROLE` 退出 2）；**容器内**未跑（本机无 Docker） | 起栈后 `docker compose run --rm --entrypoint python api -c "print('ok')"` 与 `... --entrypoint /app/deploy/entrypoint.api.sh api run python -c "print('ok')"` 各一次 |
+| R2-7 | 签名 URL 免令牌下载（真实浏览器/工具） | 测试覆盖了签名的生成与校验，未用真实客户端点过链接 | 上传一个文件 → 取响应里的 `signed_url` → `curl -sS "$SR_BASE$SIGNED"` 应 200；把 `exp` 改小后应 401 + hint「链接已过期」 |
+| R2-8 | `invoke.mjs` 退出码 4 | CLI 侧由 `packages/skillrouter-cli` owner 落地，本文档只描述契约 | `cd apps/api && python -m pytest tests/test_execution_sync_async_stream.py -q`（后端）；Agent 侧需人工造一次 `status_unknown` |
+| R2-9 | `SKILLROUTER_ALLOW_QUERY_TOKEN=1` 逃生阀被使用后会自动移除 | 依赖真实流量统计 | 访问日志里检索 `token=` 命中数；连续 30 天为 0 才可删变量（见 [troubleshooting.md](troubleshooting.md) §2.1） |
 
 ## G. 证据归档规范
 

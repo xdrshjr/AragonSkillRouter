@@ -170,3 +170,109 @@ grep -n "UPSTREAM_AUTH\|TOKEN_SCOPE_DENIED\|DB_BUSY" docs/runbook/troubleshootin
 | npm CLI `packages/skillrouter-cli` | 计划 | **已实现**：install/verify/list/update/uninstall/doctor + `invoke.mjs` 助手；37 项测试通过；真实安装与真实调用已验证 |
 | 真实第三方凭证 / 真实 Agent 推理 / Docker / 生产性能 | 待验证 | **仍待验证**（原因与复现步骤见 `verification-report.md` §6） |
 
+---
+
+## 迭代 2 偏差与已关闭缺陷
+
+> 本节只记录**做了什么、偏离了什么、还剩什么**。状态口径以
+> [`../../runbook/verification-checklist.md`](../../runbook/verification-checklist.md) 为唯一权威；
+> 具体命令与数字见 [`../../runbook/verification-report.md`](../../runbook/verification-report.md) 的「迭代 2」章节。
+> `已关闭` = 有代码 + 有断言或可复现命令；`部分关闭` = 按最小实现收口，取舍写在「偏差点」。
+
+### 1. P0 缺陷（F-01…F-12）
+
+| 编号 | 关闭情况 | 落点（代码 / 断言） | 偏差点 |
+|---|---|---|---|
+| F-01 | 已关闭 | `apps/web/lib/types.ts` 对齐后端 `{status, used_route}`；`packages/contracts` 导出类型；`cd apps/web && npx tsc --noEmit` | 无（类型即契约） |
+| F-02 | 已关闭 | `services/capabilities.py` 产 `last_test_ok/last_test_at/success_rate_24h`；聚合键改为 `call_logs.status='success'`（`LOGGED_STATUS`）；`test_api_contract.py` | 前端新增「上次测试」列（R2-15 指出原描述里根本没这列，补列后症状才可见） |
+| F-03 | 已关闭 | `services/credentials.py` 投影白名单 + `meta_sealed`（AAD `credential_meta`）+ `meta_redacted_keys`；`scripts/migrate_seal_meta.py`；`test_credentials_projection.py` / `test_crypto_credentials.py` | 敏感键**不进** `meta`（不是折叠成 `{redacted:true}`，R2-29）；存量库要跑 `migrate_seal_meta.py --apply` |
+| F-04 | 已关闭 | `deps.require_token` 只认 Bearer；`logging.redact` 增查询串脱敏；`SKILLROUTER_ALLOW_QUERY_TOKEN` 默认 0 逃生阀；`test_token_transport.py` | 逃生阀**保留**，移除判据写进 `troubleshooting.md` §2.1 与 `deploy/.env.example`（R2-35） |
+| F-05 | 已关闭 | `record_cost` 覆盖 sync/stream/async 三条路径；预算检查覆盖 token/agent/capability/provider/global 多层；成本只落 `quota_counters.cost_usd`；`test_budget_accounting.py` | **行为变更需告知**：计费口径扩到流式/异步后，小预算令牌第一次可能 `402 BUDGET_EXCEEDED`；设置页与 `examples.md` 已写明（§A.8 R2） |
+| F-06 | 已关闭 | `executors/errors.py` 对 `transport_error="timeout"` 不再 `retryable`；超时进 `status_unknown` + `needs_reconcile`；`test_execution_sync_async_stream.py` | 读超时改为「对账优先」，不自动重投（有重复计费风险） |
+| F-07 | 已关闭 | `tasks.cancel` 判定顺序改「终态 → 有 `upstream_task_id` → remote/local_only」；提交前取消 `pending_submit` + HTTP **202**；`ALLOWED["queued"]` 增 `canceling`；`test_task_cancel_race.py` | 无 |
+| F-08 | 已关闭 | `worker/leases.py` 的 `release/extend` 校验 owner；续租失败取消 handler；`test_lease_ownership.py` | 无 |
+| F-09 | 已关闭 | `upgrade/verify.py` 重写为 **artifact-first 七项三态**；`scripts/verify_artifact.mjs`；网关 `POST /internal/admin/verify-artifact`；`test_engine_upgrade.py` | 检查项从「与 86 个导出对比」改为冻结符号集（R2-34：写死数字必然漂移） |
+| F-10 | 已关闭 | 网关 `config.ts` 读 `AGENT_ENGINE_RUNTIME_DIR/current.json` 覆盖 pin 并回显 `pin_source`；`engine-host.ts` 按 `AGENT_ENGINE_HOME_ROOT/<version>` 解析；`settings.agent_engine_home_root`；`test/pointer.test.ts` | 指针文件是唯一实现（不用 symlink/junction）；`SKILLROUTER_ENGINE_HOME_ROOT` 与 `AGENT_ENGINE_HOME_ROOT` **必须同值** |
+| F-11 | 已关闭 | `services/bootstrap.py::migrate_or_adopt()` 单轨入口（空库 upgrade / 存量库指纹 stamp / 已接入 upgrade）；`scripts/adopt_alembic.py`（指纹不一致退出 3）；`0003_iteration2` 条件加列；`test_migrations_roundtrip.py` | entrypoint 仍**只**调 `bootstrap.py`，不直接调 alembic；指纹不一致时**拒绝启动**（`MIGRATION_NOT_ADOPTED`，不强行 stamp） |
+| F-12 | 已关闭 | `idempotency_keys.state(in_flight\|done)` 先占位；命中 in-flight → `409 IDEMPOTENCY_IN_PROGRESS`；`expires_at < now` 视为可重新占位；`test_execution_sync_async_stream.py` | 占位走独立短事务（R2-22），不塞进调用方事务 |
+
+### 2. P1 缺陷（F-13…F-26）
+
+| 编号 | 关闭情况 | 落点 | 偏差点 |
+|---|---|---|---|
+| F-13 | 已关闭 | `services/settings_runtime.py`（DB 覆盖 + 60s TTL）；`execution` / `retention` / 抓取守卫改读运行时值；`test_settings_runtime.py` | 生效窗口 60s（UI 提示「worker 60s 内生效」），不是即时 |
+| F-14 | 已关闭 | 新增 `POST /api/admin/settings/backup/now`（同步返回产物名 + sha256）；旧 `GET` 删除（GET 回 405）；`test_api_contract.py` / `test_auth_flow.py` | 排队接口 `POST /settings/backup`（202）**保留**，两条路并存：排队的给日常、`now` 的给运维 |
+| F-15 | 已关闭 | `api/v1/files.py::download` 改成签名优先、令牌次之；上传响应与 `output_files[]` 增 `signed_url`/`expires_at`；`test_admin_files.py::test_single_signature_algorithm` | 无效/过期签名从 `404` 改 **401**（hint 区分原因），会改变既有客户端的错误分支 |
+| F-16 | 已关闭 | 后端 `calls` 接受 `date_from/date_to` 并兼容 `from/to`；前端 `FILTER_KEYS` 改新名 | 旧别名保留一个版本（记 `X-Deprecated-Param`） |
+| F-17 | 已关闭 | 两端统一 `sort`（白名单 `created_at/updated_at/status`，不支持的列不假排序） | 前端对后端不支持的列**去掉 `sortable`**：宁可不可排序，也不假排序 |
+| F-18 | 已关闭 | `GET /api/admin/tasks` 增 `q/status/capability_key/page/page_size/sort`；前端换 `DataTable` + `useTableState` | `q` 在 `request_id/task_id/capability_key/upstream_task_id` 上做**内存子串**匹配（列表上限 2000 行） |
+| F-19 | 已关闭 | 新增 `apps/web/app/(app)/credentials/page.tsx`；`AppShell` 加**顶层**「凭证」项（R2-16：导航是扁平列表） | 只加一项，不做导航分组重构 |
+| F-20 | 已关闭 | `ci.yml` 的 `e2e`：`SR_BASE_URL` + `E2E_BASE_URL` 双写、先 `npm run build` 再 `npm run start`、`if: vars.E2E_ENABLED == '1'`；新增反向作业 `e2e-skipped` 打 `::warning::e2e skipped ≠ verified；P10 仍待验证` | 开关从 `workflow_dispatch` 输入改为**仓库变量**（`run_e2e` 保留但标废弃）；跳过告警用独立作业实现（`if` 为假时原作业整块跳过、连一行日志都不留） |
+| F-21 | 已关闭 | `ci.yml` 新增 `migrations` 作业（§A.3.12 骨架：`working-directory: apps/api`、env 三件、`pip install -r requirements-dev.txt`、`upgrade → downgrade base → upgrade → upgrade`、快照 pytest 子集）；`scripts` 作业增 YAML 自检 + `bash -n` + `run)` 断言 | 断言从「字符串存在」加强为「`run)` 必须排在 `api)` 之前」 |
+| F-22 | 已关闭 | `deploy/entrypoint.api.sh` 新增 `run` 角色（`SKILLROUTER_ROLE=run` 或首参 `run`）→ `exec "$@"`，**先判 `run` 再判 `api\|worker`**；用法文案改 `api\|worker\|run`；`init.md`/`backup-restore.md`/`troubleshooting.md` 全改 `--entrypoint python` 或 `run` 角色 | `run` 角色**不**做备份/迁移（只透传命令），避免「查一次库顺手迁移一遍」 |
+| F-23 | 已关闭 | `upgrade/switch.py` 切换前 `backup_job.quick_backup(label="pre-upgrade")`；失败 → `stage="backup"`、`backup_file_id=null`、**不装 home、不写指针**；成功回填 `engine_upgrade_runs.backup_file_id` | 备份**只含 DB + manifest**（不是旧文档说的「DB + aragon-home + 网关 lock」）；要连引擎目录留档得手工 `backup.py --include …`。`engine-upgrade.md` 已按实现改写 |
+| F-24 | 已关闭 | 新增 `upgrade/compat.py`（按版本比较 `aragon-home/sessions` 的 `schemaVersion`）；`needs_migration`/`migration_hint` 真实产出 | 结构变化 → `blocked` + `needs_migration`（阻断自动部署），不算 `failed` |
+| F-25 | 已关闭 | `services/maintenance.py::is_maintenance()`（标记存在 → 写方法与 invoke `503 MAINTENANCE`；mtime > 24h 记 `stale_maintenance_marker` 但**仍**返回 True）；`/healthz.maintenance`；`test_maintenance_mode.py` | 陈旧标记不自动清除（宁可 503 也不让半恢复的库被写），需人工删 |
+| F-26 | **部分关闭（最小实现收口）** | `engine_upgrade_runs.verify_status(passed\|blocked\|failed)` + `blocked_reasons`；`result` 与 `verify_status` 语义分离；`engine_candidates` 删 `skipped`；`POST /api/admin/engine/upgrade` 对 `blocked` 要求 `acknowledge_blocked=true`；引擎页三态徽标 + 阻断原因 + 二次确认 | **取舍**：以「状态语义 + UI 文案」最小实现收口，不新增 `candidates.state` 迁移，也不做候选生命周期完整状态机；`acknowledge_blocked` 在 API 层强校验，前端二次确认是同一请求的 UI 呈现 |
+
+### 3. 设计级缺陷（R2-01…R2-10）
+
+| 编号 | 关闭情况 | 落点 | 偏差点 / 取舍 |
+|---|---|---|---|
+| R2-01 | 已关闭 | `deploy/Dockerfile.gateway` 增 `git`（保留 `node:22-slim` 与 digest 占位注释）；`upgrade/toolchain.py` 走网关内部端点；`SKILLROUTER_ENGINE_TOOLCHAIN=gateway\|local`；`test_upgrade_toolchain.py` | `local` **仅** `SKILLROUTER_ENV=development` 生效，生产填 `local` 被忽略并记 `toolchain_local_ignored`；api/worker 镜像**不加** node/git（保持最小攻击面） |
+| R2-02 | 已关闭 | `0003_iteration2` 每列条件加（`PRAGMA table_info` 探测），`downgrade` 与 `upgrade` 对称；CI `migrations` 跑 `downgrade base → upgrade head → upgrade head` | `downgrade` 在 `meta_sealed` 非空时**中止**（`[ABORT]`），必须先 `migrate_seal_meta.py --unseal --out <file>`；见 `backup-restore.md` §5.1 |
+| R2-03 | 已关闭 | `execution.LOGGED_STATUS` 统一 `success/failed/status_unknown`；成功率按该值聚合 | 无 |
+| R2-04 | 已关闭 | `test_runs[].ok` 前端判定改布尔（`=== true`），不再与整数 `1` 比较 | 无 |
+| R2-05 | 已关闭 | `ALLOWED["queued"]` 增 `canceling`（提交前取消是唯一合法路径） | 与 §10.2 不变式 4 的冲突以 §A.3.6 表为准（§A.10 已同步） |
+| R2-06 | 已关闭 | 成本只落 `quota_counters.cost_usd`；`rate_counters` 只记 `calls/concurrent`；`usage_records.source ∈ {provider, estimated, unknown, probe}` | 文档同步：`examples.md` §3 明确 `limits`（配置）vs `usage`（实际用量） |
+| R2-07 | 已关闭 | 计费按 `DEFAULT_PRICES` 兜底（不假设「有价目才计费」）；设置页与文档写明口径 | **行为变更需告知**：存量小预算令牌可能第一次就 `402` |
+| R2-08 | 已关闭 | 复用既有 `services/files.py` 的 `SIGN_TTL_S=600 / _sign / signed_url / verify_signature`，不另造算法；`test_admin_files.py::test_single_signature_algorithm` | 上传响应与 `output_files[]` 复用同一函数、同一 TTL 常量 |
+| R2-09 | 已关闭 | 网关新增 `AGENT_ENGINE_RUNTIME_DIR`（compose 与 `.env.example` 三侧同值）；`/healthz` 增 `pin_source`/`resolved_path` | 变量从「两侧都不存在」变成「三侧显式同值」，`.env.example` 逐条写了「同值」的坑 |
+| R2-10 | 已关闭 | 网关实现 `POST /internal/admin/build`、`POST /internal/admin/verify-artifact`（`X-Internal-Token` + `/data` 前缀校验）；`/internal/admin/reload` 增字段；`types.ts` 共享类型 | 文档原先写的 `/internal/engine/*` 是错的，已统一为 `/internal/admin/*` |
+
+### 4. 未做 + 原因
+
+| 项 | 未做的原因 |
+|---|---|
+| `quota_released` 的独立列 | **幂等标记存在 `tasks.result`（JSON）里**，不新增列：`0003` 已经动了 6 列，再加一列要连带改投影、备份 manifest 兼容与前端类型，收益与风险不成比例；「一次性执行副产物」放 `tasks.result` 语义正确（同 `result.cancel_requeues`） |
+| `capability_test_runs` 加 `output`/`dropped` 列（R2-30） | 本轮不扩表：测试历史面板只能看实时响应，刷新后历史详情缺失（**已记录在案**，明确不改） |
+| 候选生命周期完整状态机（F-26 收口） | 见 F-26 偏差点：用 `verify_status` + `blocked_reasons` 的**状态语义 + UI 文案**最小实现 |
+| 导航分组重构（R2-16） | `AppShell` 是扁平列表，只加顶层「凭证」一项；分组重构属于范围外的 UI 重构 |
+| 前端 8 项手测清单（§A.7.3） | 需人工在浏览器逐条点；本机只跑了 `tsc --noEmit` / `next lint` / `next build` / vitest。已登记 `verification-checklist.md` §F1 的 R2-3 |
+| CI `migrations` / `e2e` 作业的真实执行 | 本机只做了 YAML 解析与静态断言（作业存在、`run)` 位置）。已登记 §F1 的 R2-1 / R2-2 |
+| 真实引擎升级演练（部署 + 回滚各一次） | 无真实候选版本与可用模型；已登记 P11 |
+| `docker compose up` 真起栈、网关镜像构建 | 本机无 Docker；已登记 P10 与 §F1 的 R2-5 / R2-6 |
+| MCP 真实客户端、外部 Agent 全闭环、性能基线 | 缺客户端 / 环境 / 目标硬件；保持 P5 / P6 / P8 |
+| 已知测试隔离问题（非本轮交付面） | **已修复（本轮收尾）**：`test_async_releases_concurrency_once` 原先断言「五层并发绝对归零」，当它排在会留下在途任务的用例之后时会红；改为**增量断言**（提交 +1、终态回基线、重复释放不变），`pytest tests/test_tasks_recovery.py tests/test_budget_accounting.py` 与反向顺序都绿。另修掉 `test_auth_flow.py::test_session_expiry_and_revocation` 的秒级 `created_at` 排序 flaky（加 `rowid DESC` 二级排序） |
+
+### 5. 表外支撑文件（§A.4 未逐行列，但属于已完成条目的必要支撑）
+
+复审按表核对 diff 时，下列文件会出现在 diff 里但不是「范围蔓延」：
+
+| 文件 | 为什么必须改（对应条目） |
+|---|---|
+| `apps/api/skillrouter_api/schemas/engine.py` | `POST /engine/upgrade` 新增 `acknowledge_blocked` 字段（F-26 / §A.5.2） |
+| `apps/api/skillrouter_api/services/backup_job.py` | 新增 `quick_backup(label=...)`，切换前自动备份（F-23 / §A.3.7-3） |
+| `apps/api/skillrouter_api/agent/client.py` | `reload_engine()` 同时发 `version` 与 `target_version`（兼容尚未升级的网关，R2-10） |
+| `apps/api/skillrouter_api/upgrade/{state,jobs,rollback,detect}.py`、`upgrade/__init__.py` | 三态落库（`verify_status`/`blocked_reasons`）、`policy=auto` 只在 `passed` 生效、构建 `blocked` 不产生候选（F-09 / F-26） |
+| `apps/api/tests/fixtures/fake_gateway.py` | 假网关补 `build`/`verify-artifact` 两个端点与 `pin_source`（T-41 / T-47 的夹具） |
+| `apps/api/migrations/env.py` | 允许调用方覆盖 `sqlalchemy.url`（`alembic.ini` 是占位符），否则迁移单轨跑不起来（F-11，见 spec §D2 I2-5） |
+| `scripts/e2e_live.py` | 验收脚本：`schema_version` 1→2、备份改 POST、新增 12 项断言（T-37） |
+| `scripts/check_file_plan.py` | 同时校验 §8 与 §A.4 四张表（T-40，310/310） |
+| `db/migrations/0001_init.sql`、`docs/api/openapi.json` | 重新导出的构建产物（6 个新列 / 117 paths），不是手改 |
+
+
+## 最终评审的补修（提交前复核）
+
+复审对照 §A 逐条核对 diff 后，直接修掉 14 类缺陷（清单与证据见
+[`docs/runbook/verification-report.md` §9](../../runbook/verification-report.md)），并对其中 3 条收紧了断言/契约：
+
+| 取舍 | 说明 |
+|---|---|
+| 异步调用记录的终态口径 | `call_logs.status` 只有 `success/failed/status_unknown` 三个合法值；任务 `canceled` 按 `failed` 记并写 `error_code=CANCELED`，理由是「本次调用没有成功」。没有新增 `canceled` 取值，避免全库数据迁移 |
+| `npm-only` 构建 | npm 包内没有 `packages/core` 工作区，隔离构建在 tarball 目录里必然失败；按 §A.3.7-1 判 `blocked`（不是候选的错）并指引用 tagged 通道，与 §A.3.7-0「不能验证就说不能验证」一致 |
+| `ssrf_deny` vs `ssrf_deny_extra` | 保留 DB 侧的 `ssrf_deny`（已写进 `EDITABLE`、`db/seed.py`、前端），运行时同时接受两个键并减掉部署基线；不重命名既有键，避免存量行失效 |
+
+评审过程中复跑了全部可机验项（pytest 247、alembic 四步、网关 tsc+vitest 48、web tsc/lint/build 22 路由、
+e2e 70/70、check_web 9/9、check_gateway 12/12、check_file_plan 310/310），结果见 verification-report §9.2。
+`ruff` 的存量告警仍未处理（§8.7 已如实登记），本轮只保证不新增。

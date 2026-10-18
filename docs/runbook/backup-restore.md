@@ -16,15 +16,20 @@ python scripts/restore.py var/backup/skillrouter-20261018T102017Z.zip --dry-run
 python scripts/restore.py var/backup/skillrouter-20261018T102017Z.zip --yes
 ```
 
-容器内：
+容器内（一次性命令必须走 `--entrypoint python` 或 `run` 角色，否则 `[FATAL] UNKNOWN_ROLE`）：
 
 ```bash
 docker compose -f deploy/docker-compose.yml exec api python scripts/backup.py --out /data/backup --keep 14
+# 恢复要停写：先停 api/worker，再跑一次性容器
 docker compose -f deploy/docker-compose.yml stop api worker
-docker compose -f deploy/docker-compose.yml run --rm --no-deps api \
-  python scripts/restore.py /data/backup/skillrouter-20261018T102017Z.zip --yes
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm --no-deps \
+  --entrypoint python api scripts/restore.py /data/backup/skillrouter-20261018T102017Z.zip --yes
 docker compose -f deploy/docker-compose.yml start api worker
 ```
+
+> 为什么不写 `docker compose run --rm api python …`：api 镜像的 `ENTRYPOINT` 是
+> `deploy/entrypoint.api.sh`，第一个参数是角色名，`python` 会得到 `[FATAL] UNKNOWN_ROLE`。
+> 另一种等价写法是 `--entrypoint /app/deploy/entrypoint.api.sh api run python …`（`run` 角色）。
 
 ## 1. 备份策略
 
@@ -172,6 +177,37 @@ curl -sS http://127.0.0.1:8000/healthz
 | `备份 revision … 不在本地 revision 集合中` | 4 | 备份来自更新版本的程序 | 先升级程序到对应版本；确认无误才加 `--allow-unknown-schema` |
 | `备份包完整性校验失败` | 5 | 包损坏 / 传输截断 | 换一份备份或重新同步；sha256 侧车文件可先校验 |
 | `自检未通过：表 … 行数不一致` | 1 | 恢复后被写入或包本身不一致 | 保持维护标记、不要对外服务；用 `pre-restore-*.db` 回到恢复前 |
+
+## 5.1 `0003` 回滚注意事项（`meta_sealed` 非空时 downgrade 会中止）
+
+迁移 `0003` 增了 `credentials.meta_sealed`（敏感 meta 密封，AAD `credential_meta`）。
+它的 `downgrade()` 是**保守**的：只要有一行 `meta_sealed` 非空，就**中止**回滚并给出
+「先导出明文再降级」的提示——因为直接 drop 列会让这些密封值**永久丢失**（主密钥里没有第二条路径）。
+
+回滚到 `0002` 之前：
+
+```bash
+# 1) 先备份（DB + 文件），否则「降级成功但数据没了」没人救得了
+python scripts/backup.py --label pre-0003-downgrade --keep 14
+
+# 2) 把每行 meta_sealed 解密导出到文件（只读，不写库；输出含明文，落盘后请自行加密/及时删除）
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm --no-deps \
+  --entrypoint python api scripts/migrate_seal_meta.py \
+  --db /data/skillrouter.db --unseal --out /data/backup/meta-plaintext.json
+#    家目录/本地直接跑：python scripts/migrate_seal_meta.py --unseal --out var/meta-plaintext.json
+#    退出码：0 成功 / 2 用法 / 3 库不可用 / 4 解密失败（主密钥不匹配）
+
+# 3) 降级（在 apps/api 下）
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm --no-deps \
+  --entrypoint python api -m alembic -c migrations/alembic.ini downgrade 0002_engine_upgrade
+```
+
+反向（重新升级）：`migrate_seal_meta.py` **没有导入模式**，导出的 JSON 只用于人工核对/重新录入。
+重装为 `0003` 后，把敏感键重新写回各凭证的 `meta`（界面「替换凭证」或
+`POST /api/admin/credentials/{id}/replace`），再跑
+`python scripts/migrate_seal_meta.py --apply` 把新出现的敏感键密封进 `meta_sealed`（幂等，重复执行报 `pending=0`）。
+
+> 提醒：`--unseal` 只支持「写文件」这一种导出方式（不打印到 stdout），避免明文进终端回滚缓冲。
 
 ## 6. 主密钥相关
 

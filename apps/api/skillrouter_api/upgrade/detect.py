@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import select
@@ -237,7 +236,7 @@ def due_for_check() -> bool:
             last = datetime.fromisoformat(row.value.replace("Z", "+00:00"))
         except ValueError:
             return True
-    return datetime.now(timezone.utc) - last >= interval
+    return datetime.now(UTC) - last >= interval
 
 
 def mark_checked() -> None:

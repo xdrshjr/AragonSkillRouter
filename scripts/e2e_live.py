@@ -157,6 +157,28 @@ def wait_for(url: str, timeout_s: int = 90) -> bool:
     return False
 
 
+def http_raw(method: str, url: str, *, headers: dict | None = None, data: bytes | None = None):
+    """不做 JSON 编解码的请求，返回 (status, body_text_or_json, headers)。"""
+    request = urllib.request.Request(url, data=data, method=method)
+    for key, value in (headers or {}).items():
+        request.add_header(key, value)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = response.read().decode("utf-8", "replace")
+            try:
+                return response.status, json.loads(body), {}
+            except json.JSONDecodeError:
+                return response.status, body, {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        try:
+            return exc.code, json.loads(body), {}
+        except json.JSONDecodeError:
+            return exc.code, body, {}
+    except Exception as exc:  # noqa: BLE001
+        return 0, str(exc)[:300], {}
+
+
 def main() -> int:
     upstream_port = free_port()
     api_port = free_port()
@@ -198,8 +220,8 @@ def main() -> int:
         status, health = http("GET", f"{base}/healthz")
         check(status == 200 and health.get("ok") is True, "健康检查返回 ok", str(health)[:200])
         check(health.get("initialized") is True, "初始化状态已置位")
-        check(isinstance(health.get("db"), dict) and health["db"].get("schema_version") == 1,
-              "schema_version 为 1", str(health.get("db"))[:160])
+        check(isinstance(health.get("db"), dict) and health["db"].get("schema_version") == 2,
+              "schema_version 为 2", str(health.get("db"))[:160])
 
         # 登录 + 强制改密
         status, login = http("POST", f"{base}/api/admin/auth/login",
@@ -316,6 +338,21 @@ def main() -> int:
         check(status == 200 and test_run.get("status") == "succeeded",
               "能力测试：真实 HTTP 调用 echo 上游", str(test_run)[:300])
         check(test_run.get("output") == "echo:真实联调", "测试输出与上游一致", str(test_run.get("output"))[:120])
+        # T-01 / T-37（新增 1）：前端发布闸门读同一个来源——test_runs[].ok 必须是 JSON boolean
+        check(
+            set(test_run) >= {"status", "used_route", "dropped", "output", "error", "test_run_id"},
+            "测试返回体形状与前端类型一致（无 ok/route/at）",
+            sorted(test_run)[:12].__repr__(),
+        )
+        check("ok" not in test_run and "route" not in test_run,
+              "测试返回体不含旧的 ok/route 字段", str(sorted(test_run))[:160])
+        status, detail_after_test = http("GET", f"{base}/api/admin/capabilities/{capability_id}",
+                                        headers=headers)
+        runs = detail_after_test.get("test_runs") or []
+        check(status == 200 and runs and all(isinstance(r.get("ok"), bool) for r in runs),
+              "test_runs[].ok 是 JSON boolean（发布按钮据此可用）",
+              json.dumps(runs[:2], ensure_ascii=False)[:300])
+        check(any(r.get("ok") is True for r in runs), "24h 内存在通过测试记录（发布闸门可用）")
 
         status, published = http("POST", f"{base}/api/admin/capabilities/{capability_id}/publish",
                                  headers=headers, body={"version": "1.0.0", "changelog": "e2e"})
@@ -475,8 +512,65 @@ def main() -> int:
                       (call_proc.stdout or "")[:200])
 
         # 备份（纯 Python）
-        status, backup = http("GET", f"{base}/api/admin/settings/backup/now", headers=headers)
+        status, backup = http("POST", f"{base}/api/admin/settings/backup/now", headers=headers)
         check(status == 200 and backup.get("sha256"), "备份产物生成并带 sha256", str(backup)[:200])
+
+        # T-31 / T-48（T-37 新增 3）：上传响应给出的签名 URL 不带令牌即可下载
+        boundary = "----srE2EBoundary"
+        payload = b"skillrouter e2e signed url"
+        multipart = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="e2e.txt"\r\n'
+            "Content-Type: text/plain\r\n\r\n"
+        ).encode() + payload + f"\r\n--{boundary}--\r\n".encode()
+        status, uploaded, _ = http_raw(
+            "POST",
+            f"{base}/api/v1/files",
+            headers={**auth, "Content-Type": f"multipart/form-data; boundary={boundary}"},
+            data=multipart,
+        )
+        signed = uploaded.get("signed_url") if isinstance(uploaded, dict) else None
+        check(
+            status == 201 and isinstance(signed, str) and "sig=" in (signed or ""),
+            "上传响应返回签名 URL",
+            str(uploaded)[:240],
+        )
+        check(
+            isinstance(uploaded, dict) and "expires_at" in uploaded,
+            "上传响应带 expires_at（与签名 TTL 同源）",
+            str(uploaded)[:200],
+        )
+        if isinstance(signed, str) and signed:
+            url = signed if signed.startswith("http") else f"{base}{signed}"
+            status, body_text, _ = http_raw("GET", url, headers={}, data=None)
+            check(status == 200 and payload.decode() in str(body_text),
+                  "签名 URL 无令牌下载成功（同一签名算法）", f"{status} {str(body_text)[:120]}")
+            expired = url.replace("exp=", "exp=1", 1) if "exp=" in url else url + "&exp=1"
+            status_exp, body_exp, _ = http_raw("GET", expired, headers={}, data=None)
+            check(status_exp == 401, "过期签名返回 401（不再是 404）", f"{status_exp} {str(body_exp)[:160]}")
+        else:
+            check(False, "签名 URL 无令牌下载成功（同一签名算法）", "上传未返回 signed_url")
+
+        # T-25（T-37 新增 2）：维护模式下写操作 503、读操作放行、/healthz 透出
+        marker = data_dir / ".restore-in-progress"
+        marker.write_text("e2e", encoding="utf-8")
+        try:
+            status, health_maint = http("GET", f"{base}/healthz")
+            check(isinstance(health_maint, dict) and health_maint.get("maintenance") is True,
+                  "维护模式：/healthz.maintenance == true", str(health_maint)[:200])
+            status, blocked_write = http(
+                "POST", f"{base}/api/admin/providers", headers=headers,
+                body={"slug": "e2e-maint", "name": "维护态", "category": "llm"},
+            )
+            check(status == 503 and blocked_write.get("error", {}).get("code") == "MAINTENANCE",
+                  "维护模式：写操作返回 503 MAINTENANCE", str(blocked_write)[:200])
+            status, allowed_read = http("GET", f"{base}/api/admin/providers", headers=headers)
+            check(status == 200, "维护模式：读操作仍然可用", str(status))
+        finally:
+            marker.unlink(missing_ok=True)
+        status, health_after = http("GET", f"{base}/healthz")
+        check(isinstance(health_after, dict) and health_after.get("maintenance") is False,
+              "维护标记移除后 /healthz.maintenance 恢复 false", str(health_after)[:200])
 
         status, rotate = http("POST", f"{base}/api/admin/settings/rotate-master-key", headers=headers,
                               body={})

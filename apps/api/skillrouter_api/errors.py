@@ -72,6 +72,8 @@ class Code:
     TASK_STATUS_UNKNOWN = "TASK_STATUS_UNKNOWN"
     CANCEL_UNSUPPORTED = "CANCEL_UNSUPPORTED"
     IDEMPOTENCY_KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"
+    IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
+    LEASE_LOST = "LEASE_LOST"
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
     FILE_TYPE_UNSUPPORTED = "FILE_TYPE_UNSUPPORTED"
 
@@ -89,6 +91,10 @@ class Code:
     ENGINE_SWITCH_FAILED = "ENGINE_SWITCH_FAILED"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     SSRF_BLOCKED = "SSRF_BLOCKED"
+
+
+#: 启动期常量：只用于启动日志与退出码，**不进 HTTP 码表**（§A.3.8-4）
+MIGRATION_NOT_ADOPTED = "MIGRATION_NOT_ADOPTED"
 
 
 #: code -> (http status, 中文默认说明, retryable, hint)
@@ -135,6 +141,13 @@ REGISTRY: dict[str, tuple[int, str, bool, str]] = {
     Code.TASK_STATUS_UNKNOWN: (409, "无法判定上游是否已受理", False, "调用对账接口查询"),
     Code.CANCEL_UNSUPPORTED: (409, "上游不支持取消", False, "只能停止本地等待，远端可能仍在执行"),
     Code.IDEMPOTENCY_KEY_REUSED: (409, "同一幂等键对应了不同请求", False, "使用新的幂等键"),
+    Code.IDEMPOTENCY_IN_PROGRESS: (
+        409,
+        "同一幂等键的请求正在执行中",
+        True,
+        "等待首个请求完成，或换用新的 Idempotency-Key",
+    ),
+    Code.LEASE_LOST: (409, "任务队列租约已丢失，处理权已转移", True, "任务会被重新领取执行，无需人工干预"),
     Code.FILE_TOO_LARGE: (413, "文件超过大小上限", False, "压缩或拆分文件"),
     Code.FILE_TYPE_UNSUPPORTED: (415, "文件类型不在白名单内", False, "转换格式后重试"),
     Code.TOKEN_SCOPE_DENIED: (403, "令牌没有该能力的权限", False, "在管理端扩大作用域"),

@@ -63,7 +63,28 @@ for r in c.execute('select request_id,status,error_code,latency_ms,created_at fr
 | `SESSION_EXPIRED` | 401 | 会话过期或被吊销（改密会吊销其它会话） | 重新登录；前端应跳登录并说明原因 | `admin_sessions.revoked_at/expires_at` |
 | `CSRF_INVALID` | 403 | 写请求缺少或不匹配 `X-CSRF-Token` | 刷新页面重新拿 `sr_csrf`；确认反代没有丢 header | 请求头、`admin_sessions.csrf_hash` |
 | `TOKEN_REVOKED` | 401 | 平台令牌已撤销 | 管理端重新签发；通知 Agent 侧更新凭据 | `platform_tokens.revoked_at` |
+| `TOKEN_INVALID` | 401（查询串通道为 400） | 令牌缺失、拼错，**或令牌被放进了查询串**（见下） | 只发 `Authorization: Bearer <token>`；不要拼 `token` 查询参数 | 响应 `hint`、`call_logs`/`audit_logs` |
 | `TOKEN_SCOPE_DENIED` | 403 | 令牌无该能力权限 | 扩大作用域后重试（**不泄漏**能力是否存在，所以文案统一） | `call_logs(status=failed)` |
+
+### 2.1 `TOKEN_INVALID`：令牌只认请求头（§A.3.3 / F-04）
+
+平台令牌**只在 `Authorization: Bearer <token>` 里认**。把令牌放进查询串的旧做法会
+落进反代日志、浏览器历史、`Referer`，所以本轮默认关闭（`SKILLROUTER_ALLOW_QUERY_TOKEN` 默认 `0`）：
+
+```bash
+# 错：命中默认关闭的查询串通道 → 400 TOKEN_INVALID，并在 hint 里要求改用头
+curl -sS "$SR_BASE/api/v1/whoami?token=srk_k1_xxx"
+
+# 对：
+curl -sS "$SR_BASE/api/v1/whoami" -H "Authorization: Bearer $SR_TOKEN"
+```
+
+**逃生阀**（仅迁移期）：`SKILLROUTER_ALLOW_QUERY_TOKEN=1` 可恢复旧通道，但每用一次都会记一条
+`query_token_used` 告警日志。移除判据（三条同时满足就把它删掉，不要长期留 1）：
+
+1. `docs/api/examples.md` 与 `docs/skills/connect.md` 里查询串令牌的示例为 **0**（CI 的 `scripts` 作业有脚本断言）；
+2. 所有外部 Agent 的连接包都已升级到当前 `invoke.mjs`（只发头）；
+3. 访问日志连续 30 天没有命中。
 
 ## 3. 权限与配额
 
@@ -90,6 +111,7 @@ for r in c.execute('select request_id,status,error_code,latency_ms,created_at fr
 | `UNSUPPORTED_MODE` | 400 | 请求模式不在能力 `modes` 里 | 看 `details.supported`；流式能力才会支持 `stream` |
 | `PARAM_MAP_UNRESOLVED` | 400 | route 的 `param_map` 引用了未声明的来源 | 修 `param_map` 的 `input.*` / `route.*` 引用 |
 | `IDEMPOTENCY_KEY_REUSED` | 409 | 同一幂等键配了不同请求体 | 换新的 `Idempotency-Key`（幂等作用域是 `token:<id>`/`admin:<id>`，跨令牌互不干扰） |
+| `IDEMPOTENCY_IN_PROGRESS` | 409 | 同一幂等键的请求**还在处理中**（`idempotency_keys.state=in_flight`），本轮新增（§A.5.1） | **不要换键**：用同一个 `Idempotency-Key` 退避重试（1s→2s→4s，上限 30s），或先查 `GET /api/v1/tasks/{id}` / `call_logs` 看首次请求的结果。换键会产生第二次上游调用（重复扣费） |
 | `INVALID_STATE_TRANSITION` | 409 | 状态机非法迁移（任务/流程/版本） | 刷新拿最新状态再操作；不要并发点两次 |
 
 ## 5. 上游与任务
@@ -103,8 +125,10 @@ for r in c.execute('select request_id,status,error_code,latency_ms,created_at fr
 | `UPSTREAM_UNAVAILABLE` | 503 | 上游不可用 | 查上游状态页；临时切 provider |
 | `TASK_STATUS_UNKNOWN` | 409 | 无法判定上游是否受理 | `POST /api/admin/tasks/{id}/reconcile` 对账后再决定，禁止直接重投 |
 | `CANCEL_UNSUPPORTED` | 409 | 上游不支持取消 | UI 明示「仅停止本地等待，远端可能仍在跑」；任务标 `canceled_local` |
+| `LEASE_LOST` | 409 | 任务队列租约丢失（心跳超时后被别的 worker 领走），本轮新增（§A.3.6） | **无需人工干预**：任务会被重新领取执行；`retryable=true`。若同一任务反复出现，查 worker 是否被 OOM/重启（`docker compose ps` 的 restarts、`worker_heartbeats.last_seen_at` 断档） |
 | `DB_BUSY` | 503 | 写等待超时（写序列化器 5s） | 降低并发；查是否有长事务/大导出；持续发生要按 §15.4 归档 `call_logs` |
-| `MAINTENANCE` | 503 | 维护模式（备份/恢复中） | 等维护结束；`restore.py` 完成自检后会删除 `.restore-in-progress` 标记 |
+| `MAINTENANCE` | 503 | 维护模式：`<data>/.restore-in-progress` 存在（恢复备份中） | 等维护结束；读接口照常、写请求与 invoke 被暂停。`restore.py` 完成自检后会自动删除标记；标记存活超过 24h 视为**陈旧**，日志会打 `stale_maintenance_marker`，此时按 §5.1 手工确认后删除 |
+| `MIGRATION_NOT_ADOPTED` | —（**不是 HTTP 错误码**） | 存量库的 alembic 版本与指纹不匹配：启动期常量，只出现在日志与退出码里（非 0 退出） | 见 §5.2：跑 `python scripts/adopt_alembic.py`（比对指纹后 stamp）再启动 |
 
 任务排查：
 
@@ -120,6 +144,48 @@ docker compose -f deploy/docker-compose.yml exec api python -c "
 import sqlite3;c=sqlite3.connect('/data/skillrouter.db')
 print(c.execute('select last_seen_at from worker_heartbeats order by last_seen_at desc limit 3').fetchall())"
 ```
+
+### 5.1 维护模式（`MAINTENANCE` / `503`）
+
+判据只有一个：`<SKILLROUTER_DATA_DIR>/.restore-in-progress` 存在（`scripts/restore.py` 创建与删除）。
+不是「服务没起来」，而是「库正在恢复、写进去会被污染」。
+
+```bash
+# 现在是不是维护中（true 就别再怪客户端）
+curl -sS http://127.0.0.1:8000/healthz
+# 标记文件的年龄（秒）
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm \
+  --entrypoint /app/deploy/entrypoint.api.sh api run \
+  python -c "import os,time;p='/data/.restore-in-progress';print(p, time.time()-os.stat(p).st_mtime)"
+```
+
+- 恢复脚本异常退出、标记残留超过 **24h** → 日志出现 `stale_maintenance_marker`，此时平台**仍然**
+  按维护处理（宁可 503，也不让半恢复的库被写）。确认恢复确实已失败/放弃后由人工删除：
+  `docker compose ... run --rm --entrypoint /app/deploy/entrypoint.api.sh api run rm -f /data/.restore-in-progress`，
+  然后 `curl /healthz` 看到 `maintenance:false` 再放流量。
+- 容器内一次性命令必须走 `--entrypoint python` 或 `run` 角色：`docker compose run --rm api python …`
+  会把 `python` 当角色名 → `[FATAL] UNKNOWN_ROLE`（见 [init.md](init.md) §0）。
+  本机已实测三条路径（`run` 位置参数 / `SKILLROUTER_ROLE=run` / 错误角色），命令与输出见 §F1 的 R2-6。
+
+### 5.2 `MIGRATION_NOT_ADOPTED`（启动期，不进 HTTP 错误码表）
+
+存量库有业务表但没有 `alembic_version`（F-11 之前用 `create_all` 建的库），
+`bootstrap.py` 会先算**业务表指纹**再决定 stamp：
+
+| 情况 | 行为 | 你要做什么 |
+|---|---|---|
+| 指纹一致 | `stamp 0002_engine_upgrade` → `upgrade head`，启动继续 | 什么都不用做（日志 `mode=adopted_then_upgrade`） |
+| 指纹不一致 | 打 `[FATAL] MIGRATION_NOT_ADOPTED …` 并以非 0 退出，**不写任何版本号** | 先 `--dry-run` 看差异，人工确认后再决定 |
+
+```bash
+# 只诊断，不写库（对当前库跑，容器内一次性命令用 --entrypoint python）
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm \
+  --entrypoint python api scripts/adopt_alembic.py --db /data/skillrouter.db --dry-run
+# 退出码：0 = 一致/dry-run 通过；3 = 指纹不一致（拒绝 stamp）；2 = 用法/环境错误
+```
+
+退出码 `3` 意味着**当前模型的表结构与这个库对不上**（例如中间版本改过列）。这时不要强行 stamp：
+要么先用备份恢复到一致版本，要么按差异手工补 SQL，再重试。
 
 ## 6. SKILL 与分发
 
@@ -150,6 +216,7 @@ print(c.execute('select last_seen_at from worker_heartbeats order by last_seen_a
 | 页面能开、接口 401 循环 | `SKILLROUTER_ENV=production` 下走 http，`Secure` Cookie 被丢弃 | 浏览器 DevTools 看 Set-Cookie | 必须 https；仅本地测试才改 development |
 | 概览数字不动 | 概览是聚合快照/缓存 | 刷新页面；看 api 日志有无慢查询 | 按 §15.4 处置：归档 `call_logs`、补索引、物化快照 |
 | 备份失败 `[FATAL] 数据库不存在` | 路径解析与 api 不一致 | 确认 `SKILLROUTER_DATA_DIR` / `SKILLROUTER_DB_PATH` 与容器内一致（compose 已固定 `/data`） | 用 `--db` 显式指定 |
+| 点开文件/图片链接返回 `401`（以前是 404） | 签名 URL 只 **10 分钟**有效（`exp` 为 Unix 秒，过期或签名不符），或既没签名也没带令牌。本轮把「无效签名」从 404 统一为 401，避免被误读成「文件不存在」 | 响应 `hint`：`链接已过期，请重新获取（签名 URL 有效期 10 分钟）` / `缺少 Authorization 头` | 重新取 `output_files[].signed_url`（任务详情/调用响应里都有），或改用 `Authorization: Bearer` + `files:read` 作用域 |
 | `scripts/seed_demo.py` 拒绝执行 | `SKILLROUTER_ENV=production` | — | 这是设计行为；演示数据只能进 development/staging |
 | 凭证「检测」一直失败 | 上游地址/网络/密钥错 | 看 `credential_verifications.detail_redacted` | 修凭证或 `base_url`；SSRF 拒绝需调整 `SKILLROUTER_SSRF_DENY`（谨慎） |
 | 抓取资料报 SSRF/allowlist | `SKILLROUTER_FETCH_ALLOWLIST` 为空或命中私网段 | 看审计与执行器详情 | 加白名单；不要整体删掉 `SSRF_DENY` |

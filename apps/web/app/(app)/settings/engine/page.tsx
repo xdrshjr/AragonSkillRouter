@@ -9,10 +9,11 @@ import { PageHeader } from '@/components/common/PageHeader';
 import { StatusBadge } from '@/components/common/StatusBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/components/ui/toast';
-import { apiGet, apiPost, describeError } from '@/lib/api';
+import { apiGet, apiPost, describeError, upgradeEngine } from '@/lib/api';
 import { formatDateTime, formatRelative, statusLabel } from '@/lib/format';
 import { queryKeys } from '@/lib/query';
 import type {
@@ -21,6 +22,7 @@ import type {
   EngineCapabilityState,
   EngineStatus,
   EngineUpgradeRun,
+  EngineVerifyStatus,
   Paginated,
 } from '@/lib/types';
 
@@ -37,6 +39,16 @@ export default function EngineSettingsPage() {
   const [mode, setMode] = React.useState<'verify_only' | 'deploy'>('verify_only');
   const [upgradeOpen, setUpgradeOpen] = React.useState(false);
   const [rollbackOpen, setRollbackOpen] = React.useState(false);
+  /** `verify_status === 'blocked'` 时必须显式勾选，才会带 `acknowledge_blocked` 发请求（§A.5.2） */
+  const [acknowledgeBlocked, setAcknowledgeBlocked] = React.useState(false);
+  /** 服务端按「候选版本自己的上次验证结论」判定 blocked，前端这一侧才知道（global 视图可能已刷新） */
+  const [serverBlocked, setServerBlocked] = React.useState(false);
+
+  React.useEffect(() => {
+    // 换目标版本即重置「已确认阻断」的勾选：确认永远针对具体版本
+    setAcknowledgeBlocked(false);
+    setServerBlocked(false);
+  }, [targetVersion]);
 
   const status = useQuery<EngineStatus>({
     queryKey: queryKeys.engine.status(),
@@ -108,7 +120,13 @@ export default function EngineSettingsPage() {
   });
 
   const upgrade = useMutation({
-    mutationFn: async () => apiPost<{ run_id: string; status: string; mode: string }>('/admin/engine/upgrade', { version: targetVersion, mode }),
+    mutationFn: async () =>
+      upgradeEngine({
+        version: targetVersion,
+        mode,
+        // 只有确认过阻断风险才带 acknowledge_blocked；未阻断不携带该字段
+        ...(acknowledgeBlocked && (isBlocked || serverBlocked) ? { acknowledge_blocked: true } : {}),
+      }),
     onSuccess: async (run) => {
       toast({
         title: mode === 'deploy' ? '升级已开始' : '验证已开始',
@@ -116,13 +134,27 @@ export default function EngineSettingsPage() {
         tone: 'info',
       });
       setUpgradeOpen(false);
+      setAcknowledgeBlocked(false);
+      setServerBlocked(false);
       await queryClient.invalidateQueries({ queryKey: queryKeys.engine.runs() });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.engine.status() });
     },
     onError: (cause) => {
       const info = describeError(cause);
+      const code = info.code;
+      // 后端按「候选版本自己的上次结论」校验：global 视图不是 blocked 时也会在这里命中
+      if (code === 'VALIDATION_FAILED') {
+        setServerBlocked(true);
+        setAcknowledgeBlocked(false);
+      }
       toast({
-        title: info.code === 'UPGRADE_IN_PROGRESS' ? '已有升级在运行' : '升级失败',
-        description: info.message,
+        title:
+          code === 'UPGRADE_IN_PROGRESS'
+            ? '已有升级在运行'
+            : code === 'VALIDATION_FAILED'
+              ? '该候选上次验证为 blocked，需先确认风险'
+              : '升级失败',
+        description: info.hint ? `${info.message}（${info.hint}）` : info.message,
         tone: 'danger',
         requestId: info.requestId,
       });
@@ -172,6 +204,17 @@ export default function EngineSettingsPage() {
   const runningRun = runList.find((run) => !run.finished_at && run.result === null);
   const failedRun = runList.find((run) => run.result === 'failed');
 
+  // 三态（§A.5.2）：passed 可自动/手动；blocked 必须人工确认且禁止自动升级；failed 说明验证本身失败
+  const verifyStatus: EngineVerifyStatus | null = data.verify_status ?? null;
+  const blockedReasons = data.blocked_reasons ?? [];
+  const isBlocked = verifyStatus === 'blocked';
+  /** 需要「确认阻断风险」的场景：全局结论是 blocked，或服务端刚按候选自身结论拒绝过 */
+  const needsAck = isBlocked || serverBlocked;
+  const verifyTone = verifyStatus === 'passed' ? 'ok' : verifyStatus === 'blocked' ? 'warn' : 'danger';
+  const verifyLabel =
+    verifyStatus === 'passed' ? '验证通过' : verifyStatus === 'blocked' ? '已阻断' : verifyStatus === 'failed' ? '验证失败' : '未验证';
+  const autoUpgradePaused = isBlocked && data.engine_policy === 'auto';
+
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
@@ -186,6 +229,10 @@ export default function EngineSettingsPage() {
             </Badge>
             <Badge tone="outline" mono>
               pin {data.engine_pin}
+            </Badge>
+            <Badge tone="neutral">{data.pin_source === 'env' ? 'pin 来自环境变量' : 'pin 来自指针文件'}</Badge>
+            <Badge tone={verifyTone} dot>
+              {verifyLabel}
             </Badge>
             <Badge tone="neutral">适配层 {data.adapter_version}</Badge>
             <Badge tone="neutral">策略 {statusLabel(data.engine_policy)}</Badge>
@@ -218,6 +265,82 @@ export default function EngineSettingsPage() {
           </>
         }
       />
+
+      {/* 升级前置验证结论（§A.5.2 `verify_status`）：passed / blocked / failed 三态 */}
+      <section aria-label="升级前置验证" className="sr-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-1.5 text-16 font-semibold text-content">
+            <ShieldCheck size={16} strokeWidth={1.75} aria-hidden />
+            升级前置验证
+          </h2>
+          <div className="flex flex-wrap items-center gap-1">
+            <Badge tone={verifyTone} dot>
+              {verifyLabel}
+            </Badge>
+            <Badge tone="outline" mono>
+              pin 来源 {data.pin_source ?? '未知'}
+            </Badge>
+          </div>
+        </div>
+
+        {verifyStatus === null ? (
+          <p className="mt-2 text-13 text-content-muted">
+            还没有验证结论。点「立即检测」或触发一次「仅验证」后，这里会显示 passed / blocked / failed。
+          </p>
+        ) : verifyStatus === 'passed' ? (
+          <p className="mt-2 text-13 text-content">
+            验证通过：可以按升级策略自动或手动切换；升级失败会自动回滚到上一版本。
+          </p>
+        ) : verifyStatus === 'failed' ? (
+          <div className="mt-2 rounded border border-danger bg-[var(--sr-danger-weak)] px-3 py-2 text-13 text-content">
+            <p>验证本身失败（构建或健康检查没过），不要切换，先按下方检查项修好再重试。</p>
+            {blockedReasons.length > 0 ? (
+              <ul className="mt-1 flex flex-col gap-0.5 text-12 text-content-muted">
+                {blockedReasons.map((reason) => (
+                  <li key={reason}>· {reason}</li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : (
+          <div className="mt-2 rounded border border-warn bg-[var(--sr-warn-weak)] px-3 py-2 text-13 text-content">
+            <p className="font-medium">已阻断（blocked）：自动升级被暂停，必须人工确认才能切换。</p>
+            {autoUpgradePaused ? (
+              <p className="mt-0.5 text-12 text-content-muted">
+                当前策略是 auto，但 blocked 状态下不会自动部署——这是刻意的保护，不是 bug。
+              </p>
+            ) : null}
+            {blockedReasons.length === 0 ? (
+              <p className="mt-1 text-12 text-content-muted">后端没有给出具体原因，请查看升级记录里的检查项明细。</p>
+            ) : (
+              <div className="mt-1">
+                <p className="text-12 font-medium">阻断原因（{blockedReasons.length}）：</p>
+                <ul className="mt-0.5 flex flex-col gap-0.5 text-12 text-content-muted">
+                  {blockedReasons.map((reason) => (
+                    <li key={reason}>· {reason}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <p className="mt-1 text-12 text-content-muted">
+              下一步：① 按上面的原因修复（权限 / 缺失适配 / 工具链）；② 重新「仅验证」拿到 passed；
+              ③ 确实要带病切换时，在升级对话框里勾选「了解阻断原因」后再提交（请求会带
+              <code className="sr-mono"> acknowledge_blocked </code>）。
+            </p>
+          </div>
+        )}
+
+        <dl className="mt-3 grid grid-cols-1 gap-1 text-12 sm:grid-cols-2">
+          <div>
+            <dt className="text-content-muted">已解析路径（resolved_path）</dt>
+            <dd className="sr-mono break-all text-content">{data.resolved_path ?? '—'}</dd>
+          </div>
+          <div>
+            <dt className="text-content-muted">最近检测</dt>
+            <dd className="text-content">{data.last_checked_at ? formatRelative(data.last_checked_at) : '未知'}</dd>
+          </div>
+        </dl>
+      </section>
 
       {/* 升级中：实时进度 */}
       {runningRun ? (
@@ -420,21 +543,84 @@ export default function EngineSettingsPage() {
         )}
       </section>
 
-      {/* 升级确认 */}
-      <DangerConfirm
+      {/* 升级确认：blocked 时必须勾选「了解阻断原因」才提交（DangerConfirm 无法承载可选勾选，这里用 Dialog） */}
+      <Dialog
         open={upgradeOpen}
-        onOpenChange={setUpgradeOpen}
-        title={mode === 'deploy' ? '部署引擎升级' : '仅验证候选版本'}
-        action={mode === 'deploy' ? '升级' : '验证'}
-        description="升级会隔离构建 → 验证 → 切换 → 健康检查；失败会自动回滚到上一版本。"
-        impacts={[
-          { id: targetVersion || 'none', label: `目标版本 ${targetVersion || '未选择'}`, detail: `模式 ${mode}` },
-          { id: 'current', label: `当前版本 ${data.engine.version ?? '未知'}`, detail: `策略 ${data.engine_policy}` },
-        ]}
-        confirmLabel={mode === 'deploy' ? `升级到 ${targetVersion}` : `验证 ${targetVersion}`}
-        loading={upgrade.isPending}
-        onConfirm={() => upgrade.mutateAsync()}
-      />
+        onOpenChange={(open) => {
+          setUpgradeOpen(open);
+          if (!open) setAcknowledgeBlocked(false);
+        }}
+      >
+        <DialogContent
+          title={mode === 'deploy' ? '部署引擎升级' : '仅验证候选版本'}
+          description="升级会隔离构建 → 验证 → 切换 → 健康检查；失败会自动回滚到上一版本。"
+          width="sm"
+          footer={
+            <>
+              <DialogClose asChild>
+                <Button variant="secondary" size="sm">
+                  取消
+                </Button>
+              </DialogClose>
+              <Button
+                variant="primary"
+                size="sm"
+                loading={upgrade.isPending}
+                disabled={!targetVersion || (needsAck && !acknowledgeBlocked)}
+                onClick={() => upgrade.mutate()}
+              >
+                {mode === 'deploy' ? `升级到 ${targetVersion || '…'}` : `验证 ${targetVersion || '…'}`}
+              </Button>
+            </>
+          }
+        >
+          <div className="flex flex-col gap-3 text-13">
+            <ul className="flex flex-col gap-1">
+              <li className="text-content">
+                目标版本 <code className="sr-mono">{targetVersion || '未选择'}</code> · 模式 {mode}
+              </li>
+              <li className="text-content-muted">
+                当前版本 {data.engine.version ?? '未知'} · 策略 {statusLabel(data.engine_policy)} · pin 来源{' '}
+                {data.pin_source ?? '未知'}
+              </li>
+            </ul>
+
+            {needsAck ? (
+              <div className="rounded border border-warn bg-[var(--sr-warn-weak)] px-3 py-2">
+                <p className="flex items-center gap-1.5 font-medium text-content">
+                  <CircleAlert size={14} strokeWidth={1.75} className="text-warn" aria-hidden />
+                  前置验证结论是 blocked：需要确认风险
+                </p>
+                {blockedReasons.length > 0 ? (
+                  <ul className="mt-1 flex flex-col gap-0.5 text-12 text-content-muted">
+                    {blockedReasons.map((reason) => (
+                      <li key={reason}>· {reason}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1 text-12 text-content-muted">后端未给出具体原因，请先看升级记录里的检查项。</p>
+                )}
+                <label className="mt-2 flex items-start gap-2 text-13 text-content">
+                  <input
+                    type="checkbox"
+                    checked={acknowledgeBlocked}
+                    onChange={(event) => setAcknowledgeBlocked(event.target.checked)}
+                    className="mt-0.5 h-4 w-4"
+                  />
+                  <span>
+                    我已了解上述阻断原因，仍要{mode === 'deploy' ? '部署该版本' : '执行验证'}
+                    （将带 <code className="sr-mono">acknowledge_blocked: true</code>）
+                  </span>
+                </label>
+              </div>
+            ) : null}
+
+            {upgrade.isError ? (
+              <p className="text-12 text-danger">{describeError(upgrade.error).message}</p>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* 回滚确认 */}
       <DangerConfirm

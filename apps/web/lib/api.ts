@@ -10,7 +10,23 @@
  * - 401 → 跳登录；503 MAINTENANCE → 广播维护事件（AppShell 展示维护横幅）
  */
 
-import type { ApiErrorShape, JsonObject } from './types';
+import type {
+  ApiErrorShape,
+  BackupNowResult,
+  CallMode,
+  CancelResult,
+  Capability,
+  CapabilityTestResult,
+  Credential,
+  CredentialListParams,
+  EngineUpgradeRequest,
+  HealthStatus,
+  JsonObject,
+  Paginated,
+  SettingsSaved,
+  Task,
+  TaskListParams,
+} from './types';
 
 export const MAINTENANCE_EVENT = 'sr:maintenance';
 export const OFFLINE_EVENT = 'sr:connectivity';
@@ -375,6 +391,94 @@ export interface ListParams extends QueryParams {
   sort?: string;
   q?: string;
   status?: string;
+}
+
+/* ── 各资源列表（§A.3.11 白名单参数集中在这里，页面不再手拼查询串） ── */
+
+/** `GET /api/admin/capabilities`：`sort` 白名单由后端校验，这里只透传 */
+export const listCapabilities = (
+  params: ListParams,
+  signal?: AbortSignal,
+): Promise<Paginated<Capability>> =>
+  apiGet<Paginated<Capability>>('/admin/capabilities', params, signal);
+
+/** `GET /api/admin/tasks`：`q`/`status`/`capability_key`/`sort`（白名单 `created_at,updated_at,status`） */
+export const listTasks = (params: TaskListParams, signal?: AbortSignal): Promise<Paginated<Task>> =>
+  apiGet<Paginated<Task>>('/admin/tasks', { ...params }, signal);
+
+/** `GET /api/admin/credentials`：分页 + `q` + `status`（含 `expiring`）+ `sort`（白名单见 §A.3.11） */
+export const listCredentials = (
+  params: CredentialListParams,
+  signal?: AbortSignal,
+): Promise<Paginated<Credential>> =>
+  apiGet<Paginated<Credential>>('/admin/credentials', { ...params }, signal);
+
+/** `POST /api/admin/capabilities/{id}/test`：真实触达上游（会计费） */
+export const testCapability = (
+  capabilityId: string,
+  payload: { input: JsonObject; route_id?: string | null; mode?: CallMode | null; save_payload?: boolean },
+  signal?: AbortSignal,
+): Promise<CapabilityTestResult> =>
+  apiPost<CapabilityTestResult>(`/admin/capabilities/${capabilityId}/test`, payload, { signal });
+
+/** `POST /api/admin/settings/backup/now`（同步备份；旧 GET 已删除，GET 会 405） */
+export const triggerBackupNow = (signal?: AbortSignal): Promise<BackupNowResult> =>
+  apiPost<BackupNowResult>('/admin/settings/backup/now', {}, { signal });
+
+/** `PATCH /api/admin/settings`：返回 `saved_at` 与 `effective`（worker ≤60s） */
+export const saveSettings = (
+  payload: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<SettingsSaved> => apiPatch<SettingsSaved>('/admin/settings', payload, { signal });
+
+/** `POST /api/admin/engine/upgrade`：`blocked` 状态下必须带 `acknowledge_blocked` */
+export const upgradeEngine = (
+  payload: EngineUpgradeRequest,
+  signal?: AbortSignal,
+): Promise<{ run_id: string; status: string; mode: string }> =>
+  apiPost<{ run_id: string; status: string; mode: string }>(
+    '/admin/engine/upgrade',
+    {
+      version: payload.version,
+      mode: payload.mode,
+      ...(payload.acknowledge_blocked === undefined
+        ? {}
+        : { acknowledge_blocked: payload.acknowledge_blocked }),
+    },
+    { signal },
+  );
+
+/** `POST /api/admin/tasks/{id}/cancel`：提交中取消回 202 + `canceling`/`pending_submit` */
+export const cancelTask = (taskId: string, signal?: AbortSignal): Promise<CancelResult> =>
+  apiPost<CancelResult>(`/admin/tasks/${taskId}/cancel`, {}, { signal });
+
+/**
+ * 读 `/healthz` 的 `maintenance`（§A.3.13）。
+ *
+ * 走原生 fetch 而不是 `apiGet`：健康检查在 API 根路径（不是 `/api/*`），
+ * 反代/改写是否把 `/healthz` 透传到 FastAPI 由部署侧决定，因此两个候选都试一次；
+ * 都拿不到结构化响应时返回 `null`（调用方保留上一次已知状态与 503 事件驱动的横幅）。
+ */
+export async function fetchHealthz(signal?: AbortSignal): Promise<HealthStatus | null> {
+  for (const path of ['/healthz', '/api/healthz']) {
+    try {
+      const response = await fetch(path, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal,
+      });
+      if (!response.ok) continue;
+      if (!(response.headers.get('content-type') ?? '').includes('application/json')) continue;
+      const data = (await response.json()) as Partial<HealthStatus> | null;
+      if (!data || typeof data.maintenance !== 'boolean') continue;
+      return data as HealthStatus;
+    } catch {
+      /* 换下一个候选路径；网络中断时由 api 层的 OFFLINE_EVENT 负责提示 */
+    }
+  }
+  return null;
 }
 
 /** 上传附件（管理端 `POST /api/admin/files`，会话 + CSRF）。

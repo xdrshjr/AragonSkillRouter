@@ -8,6 +8,8 @@ from pydantic import BaseModel
 class UpgradeRequest(BaseModel):
     version: str
     mode: str = "verify_only"
+    #: `verify_status='blocked'` 时仍要切换，必须显式确认风险（§A.3.7-1-4）
+    acknowledge_blocked: bool = False
 
 
 class RollbackEngineRequest(BaseModel):

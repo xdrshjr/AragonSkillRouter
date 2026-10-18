@@ -16,7 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/components/ui/toast';
 import { apiDelete, apiGet, apiPost, describeError, isApiError } from '@/lib/api';
-import { formatDateTime, formatDuration, formatRelative } from '@/lib/format';
+import { formatDateTime, formatDuration, formatRelative, prettyJson } from '@/lib/format';
 import { queryKeys } from '@/lib/query';
 import type { Credential, CredentialImpact, CredentialVerification } from '@/lib/types';
 
@@ -176,6 +176,10 @@ export default function CredentialDetailPage() {
   const data = credential.data;
   if (!data) return null;
 
+  // meta 投影：只展示白名单键的键值；被剔除/密封的键只给键名（spec §A.3.2）
+  const publicMetaKeys = Object.keys(data.meta ?? {});
+  const metaRedactedKeys = data.meta_redacted_keys ?? [];
+
   const impactedCapabilities = impact.data?.capabilities ?? [];
   const impactedSkills = impact.data?.skills ?? [];
   const impactedTokens = impact.data?.tokens ?? [];
@@ -308,6 +312,68 @@ export default function CredentialDetailPage() {
           )}
         </section>
       </div>
+
+      <section aria-label="密钥元数据" className="sr-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-16 font-semibold text-content">密钥元数据（meta）</h2>
+          <div className="flex flex-wrap items-center gap-1">
+            <Badge tone={data.meta_sealed ? 'info' : 'neutral'} dot>
+              {data.meta_sealed ? '敏感键已密封' : '无密封键'}
+            </Badge>
+            <Badge tone="outline" mono>
+              掩码 {data.secret_mask || '—'}
+            </Badge>
+            <Badge tone="outline" mono>
+              指纹 {data.secret_fingerprint || '—'}
+            </Badge>
+          </div>
+        </div>
+        <p className="mt-1 text-12 text-content-muted">
+          接口只返回白名单键；共享密钥、token、签名类字段被密封在 <code className="sr-mono">meta_sealed</code> 里，
+          只以键名回显，任何页面都不会出现明文。
+        </p>
+
+        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div>
+            <h3 className="text-12 font-medium text-content-muted">可见键（白名单）</h3>
+            {publicMetaKeys.length === 0 ? (
+              <p className="mt-1 text-13 text-content-muted">没有可展示的 meta 键。</p>
+            ) : (
+              <dl className="mt-1 flex flex-col gap-1 text-13">
+                {publicMetaKeys.map((key) => (
+                  <div key={key} className="flex items-start justify-between gap-2">
+                    <dt className="sr-mono text-12 text-content-muted">{key}</dt>
+                    <dd className="max-w-[60%] break-all text-right text-12 text-content">
+                      {prettyJson(data.meta[key], 200)}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </div>
+          <div>
+            <h3 className="text-12 font-medium text-content-muted">
+              被密封 / 被剔除的键（{metaRedactedKeys.length}）
+            </h3>
+            {data.meta_redacted_keys.length === 0 ? (
+              <p className="mt-1 text-13 text-content-muted">没有被剔除的键。</p>
+            ) : (
+              <ul className="mt-1 flex flex-wrap gap-1" aria-label="被剔除的 meta 键名">
+                {metaRedactedKeys.map((key) => (
+                  <li key={key}>
+                    <Badge tone="warn" mono>
+                      {key}
+                    </Badge>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="mt-1 text-12 text-content-muted">
+              这里只有键名。需要修改时请用「替换密文」或更新凭证的 meta。
+            </p>
+          </div>
+        </div>
+      </section>
 
       <section aria-label="验证历史" className="sr-card p-4">
         <h2 className="text-16 font-semibold text-content">验证历史</h2>

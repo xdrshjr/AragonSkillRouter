@@ -74,6 +74,11 @@ Remove-Item .\token.txt
 `icacls` 收紧为仅当前用户），`SKILLROUTER_TOKEN` 环境变量可临时覆盖。
 `skillrouter.config.json` 里只有 `token_ref`。
 
+**令牌怎么发**：`invoke.mjs` 只把它放进 `Authorization: Bearer <token>` 请求头。
+平台侧查询串通道（`token` 查询参数）**默认关闭**，拼进 URL 会得到 `400 TOKEN_INVALID`
+（逃生阀 `SKILLROUTER_ALLOW_QUERY_TOKEN` 只在迁移期开，见
+[../runbook/troubleshooting.md](../runbook/troubleshooting.md) §2.1）。本文不提供任何「令牌进 URL」的写法。
+
 ## 2. 验证
 
 ```bash
@@ -178,20 +183,49 @@ skillrouter list
 
 ## 6. 退出码
 
+**两套退出码，别混用**：`skillrouter`（安装器/体检）与 `invoke.mjs`（Agent 的执行助手）是两个不同的可执行体。
+
+### 6.1 `skillrouter install / verify / update / uninstall / doctor`（Node CLI）
+
 | 码 | 含义 | 处置 |
 |---|---|---|
 | 0 | 成功 | — |
 | 1 | 一般失败（目标已存在且未加 `--force`、验证未通过、SKILL 契约自检失败） | 看输出里的 `hint` |
 | 2 | 参数错误（未知命令/参数、缺 `--base-url`、令牌格式不对、`--transport mcp`） | `skillrouter <cmd> --help` |
 | 3 | 连通性失败（DNS/连接/超时） | `curl -sS <base-url>/api/v1/health` |
-| 4 | 无写入权限 | 换 `--dir` 或修目录权限 |
+| 4 | 无写入权限（`EACCES`/`EPERM`） | 换 `--dir` 或修目录权限 |
 | 5 | 未探测到 Agent / 找不到已安装目录 | 用 `--dir <path>` 指定 |
+
+### 6.2 `invoke.mjs`（Agent 调能力时用；**这里的 4 是「结果不确定」**）
+
+| 码 | 含义 | 处置 |
+|---|---|---|
+| 0 | 成功（`status: succeeded`） | — |
+| 1 | 失败（业务/上游错误，`error.code` 有值；`status: failed`） | 按 `error.code` 分支处理，不要匹配文案 |
+| 2 | 参数错误（未知子命令、缺 `--capability`/`--input`、`--mode` 非法） | `node ./invoke.mjs --help` |
+| 3 | 连通性失败（DNS/连接/超时，令牌无效也走这里） | `node ./invoke.mjs health` 先确认平台可达 |
+| **4** | **结果不确定**：`status: status_unknown` 或 `needs_reconcile: true`——**不确定 ≠ 失败**，上游可能已经受理 | **不要重投**（会重复扣费）。先用 `node ./invoke.mjs task.status <task_id>`（异步）或 `request_id` 找管理员复查/对账，确认上游无记录后再重发 |
+
+> 「不确定」被单独给一个退出码，是因为它和「失败」的正确反应**相反**：失败可以重试，
+> 不确定只能复查。脚本里请把 `4` 与 `1` 分开处理：
+
+```bash
+node ./invoke.mjs invoke --capability text.generate.gpt4o-mini --input '{"prompt":"你好"}'
+case $? in
+  0) echo "成功" ;;
+  4) echo "结果不确定：先复查（tasks 子命令），不要重投" ;;
+  *) echo "失败：按 error.code 处置" ;;
+esac
+```
 
 ## 7. 故障排查
 
 | 现象 | 可能原因 | 处置 |
 |---|---|---|
 | `verify` 三项全 ✗ 且退出码 3 | 域名/证书/反代不通，或平台未启动 | `curl -sS <base-url>/api/v1/health`；查 nginx 与 api 日志 |
+| `invoke` 退出码 **4**（`status: status_unknown`） | 结果不确定：上游可能已受理（超时发生在提交过程中） | **不要重投**：`node ./invoke.mjs task.status <task_id>` 复查；异步任务可让管理员 `POST /api/admin/tasks/{id}/reconcile` |
+| `invoke` 输出里 `needs_reconcile: true`（退出码 4） | 本次调用被标记为需要人工对账 | 同上；确认上游无记录后再重发，并把 `request_id` 记进故障单 |
+| `400 TOKEN_INVALID`，URL 里带了 `token` 查询参数 | 查询串通道默认关闭（令牌只认请求头） | 删掉 URL 里的参数，让 `invoke.mjs` 发头；不要自己拼 curl |
 | `401 TOKEN_REVOKED` | 令牌被撤销 | 管理端重新签发，重跑 `install`（或改凭据文件） |
 | `403 TOKEN_SCOPE_DENIED` | 令牌作用域不含该能力 | 管理端扩大作用域后重试（无需重装） |
 | `409 NOT_INITIALIZED` | 平台还没初始化 | 服务器上跑 `python scripts/bootstrap.py` |

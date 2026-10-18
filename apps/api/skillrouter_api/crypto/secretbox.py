@@ -1,6 +1,17 @@
 """AES-256-GCM 信封加密（§7.4）。
 
 密文格式：`v1.<key_id>.<b64url(nonce)>.<b64url(ciphertext)>`，AAD = `f"{record_type}:{record_id}:{key_id}"`。
+
+`record_type` 的全部取值（**新增取值必须同时改这里**，否则轮换/回滚时无法判断
+某段密文该用哪个 AAD 打开；§A.3.2-5 / F-32）：
+
+| `record_type`     | `record_id`            | 写入点                                              | 内容 |
+|-------------------|------------------------|-----------------------------------------------------|------|
+| `credential`      | `credentials.id`       | `services/credentials.py`（create/replace/rotate）、`crypto/keyring.py` | 上游密钥原文 |
+| `credential_meta` | `credentials.id`       | `services/credentials.py::_split_meta()`            | 命中 `_SENSITIVE_META` 的 meta 键值（JSON） |
+| `provider_secret` | `providers.id`         | 预留：提供商级共享密钥（当前无写入点）              | 提供商密钥原文 |
+| `setting`         | 设置键名（如 `agent_model`） | `crypto/keyring.py`                            | 设置值中的敏感字段（轮换时重加密） |
+| `file`            | `file_objects.id`      | 预留：需要二次加密的文件内容（当前文件用磁盘权限 + 签名 URL） | 文件字节 |
 """
 
 from __future__ import annotations
@@ -15,6 +26,9 @@ from ..errors import ApiError, Code
 from . import masterkey
 
 VERSION = "v1"
+
+#: 与上表同步的取值集合（供轮换脚本/自检遍历；新增 `record_type` 时同时改表与集合）
+RECORD_TYPES = frozenset({"credential", "credential_meta", "provider_secret", "setting", "file"})
 
 
 def _b64(raw: bytes) -> str:

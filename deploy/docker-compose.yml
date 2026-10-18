@@ -46,6 +46,14 @@ services:
       SKILLROUTER_DATA_DIR: /data
       SKILLROUTER_DB_PATH: /data/skillrouter.db
       SKILLROUTER_AGENT_GATEWAY_URL: http://gateway:8500
+      # ── 引擎与取消对账（§A.3.7-2）：下面五个变量在 api/worker/gateway **三侧同值**。
+      #    每一侧只读自己前缀的那几个（Python 侧 `SKILLROUTER_*`，边车 `AGENT_*`），
+      #    但写在一起才能避免「只改了一侧 → 引擎装了却没生效」这种最难排查的故障。
+      SKILLROUTER_ENGINE_HOME_ROOT: /data/aragon-home/engines
+      AGENT_ENGINE_HOME_ROOT: /data/aragon-home/engines
+      AGENT_ENGINE_RUNTIME_DIR: /data/engine-runtime
+      SKILLROUTER_ENGINE_TOOLCHAIN: ${SKILLROUTER_ENGINE_TOOLCHAIN:-gateway}
+      SKILLROUTER_CANCEL_RECONCILE_MINUTES: ${SKILLROUTER_CANCEL_RECONCILE_MINUTES:-30}
     volumes:
       - skillrouter-data:/data
     ports:
@@ -86,6 +94,12 @@ services:
       SKILLROUTER_DATA_DIR: /data
       SKILLROUTER_DB_PATH: /data/skillrouter.db
       SKILLROUTER_AGENT_GATEWAY_URL: http://gateway:8500
+      # 与 api / gateway 同值（§A.3.7-2）；worker 只读 SKILLROUTER_*，AGENT_* 由边车读取。
+      SKILLROUTER_ENGINE_HOME_ROOT: /data/aragon-home/engines
+      AGENT_ENGINE_HOME_ROOT: /data/aragon-home/engines
+      AGENT_ENGINE_RUNTIME_DIR: /data/engine-runtime
+      SKILLROUTER_ENGINE_TOOLCHAIN: ${SKILLROUTER_ENGINE_TOOLCHAIN:-gateway}
+      SKILLROUTER_CANCEL_RECONCILE_MINUTES: ${SKILLROUTER_CANCEL_RECONCILE_MINUTES:-30}
     volumes:
       - skillrouter-data:/data
     depends_on:
@@ -131,7 +145,14 @@ services:
       ENGINE_PIN: ${SKILLROUTER_ENGINE_PIN_VERSION:-0.2.34}
       SKILLROUTER_INTERNAL_URL: http://api:8000
       AGENT_POLICY_PATH: /data/agent-policy.json
+      # 引擎安装根（网关读 `<root>/<version>/node_modules/@aragon-agent/core`）与
+      # 指针目录（Python 写 `current.json`、网关读；两者都在共享 /data 卷上，§A.3.7-2）。
+      # 必须与 api/worker 侧的 `SKILLROUTER_ENGINE_HOME_ROOT` 取同一个值。
       AGENT_ENGINE_HOME_ROOT: /data/aragon-home/engines
+      AGENT_ENGINE_RUNTIME_DIR: /data/engine-runtime
+      SKILLROUTER_ENGINE_HOME_ROOT: /data/aragon-home/engines
+      SKILLROUTER_ENGINE_TOOLCHAIN: ${SKILLROUTER_ENGINE_TOOLCHAIN:-gateway}
+      SKILLROUTER_CANCEL_RECONCILE_MINUTES: ${SKILLROUTER_CANCEL_RECONCILE_MINUTES:-30}
       AGENT_SESSION_DIR: /data/agent-sessions
       AGENT_MODEL_PROVIDER: ${SKILLROUTER_AGENT_MODEL_PROVIDER:-anthropic}
       AGENT_MODEL_ID: ${SKILLROUTER_AGENT_MODEL:-}

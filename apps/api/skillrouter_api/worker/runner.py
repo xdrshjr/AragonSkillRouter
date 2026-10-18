@@ -34,6 +34,7 @@ class Worker:
         self._stop = asyncio.Event()
         self._handlers: dict[str, Handler] = {}
         self._running: set[asyncio.Task] = set()
+        self._lost_leases: set[str] = set()
         self._started_at = now_iso()
 
     # ── 注册 ────────────────────────────────────────────────
@@ -110,19 +111,45 @@ class Worker:
     async def _execute(self, row) -> None:  # noqa: ANN001
         from .handlers import DEFAULT_TIMEOUT_S
 
+        queue_id = row.id
         handler = self._handlers.get(row.kind)
         if handler is None:
-            leases.release(row.id, ok=False, error=f"unknown handler {row.kind}")
+            leases.release(
+                queue_id, worker_id=self.worker_id, ok=False, error=f"unknown handler {row.kind}"
+            )
             return
         timeout = DEFAULT_TIMEOUT_S.get(row.kind, 600)
-        lease_task = asyncio.create_task(self._renew_loop(row.id))
+        handler_task = asyncio.create_task(handler(row.payload or {}))
+        lease_task = asyncio.create_task(self._renew_loop(queue_id, handler_task))
         try:
-            await asyncio.wait_for(handler(row.payload or {}), timeout=timeout)
-            leases.release(row.id, ok=True)
+            result = await asyncio.wait_for(handler_task, timeout=timeout)
+            if self._is_terminal(result):
+                leases.release(queue_id, worker_id=self.worker_id, ok=True)
+            else:
+                # handler 自己说「没走完」：不是成功，按 STATE_RACE 重排队（别盲判成功）
+                leases.release(
+                    queue_id, worker_id=self.worker_id, ok=False, error="STATE_RACE"
+                )
+        except asyncio.CancelledError:
+            lost = queue_id in self._lost_leases
+            self._lost_leases.discard(queue_id)
+            reason = "LEASE_LOST" if lost else "SHUTDOWN"
+            log.warning("handler_cancelled", extra={"object": queue_id, "detail": {"reason": reason}})
+            handler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await handler_task
+            # 条件释放：租约可能已被他人重新领取（owner 不匹配时 release 返回 False，队列行不动）
+            leases.release(queue_id, worker_id=self.worker_id, ok=False, error=reason)
+            # 注意：租约丢失/优雅停机时**不**释放并发额度、不回收调用记录——
+            # 任务会在新 owner 或下一轮继续执行，此刻收口会让额度被二次占用（§A.3.6-7）。
+            if not lost:
+                # 优雅停机：清理完继续向上传播取消
+                raise
         except asyncio.TimeoutError:
-            log.error("handler_timeout", extra={"object": row.id, "detail": {"kind": row.kind}})
-            leases.release(row.id, ok=False, error="TIMEOUT")
+            log.error("handler_timeout", extra={"object": queue_id, "detail": {"kind": row.kind}})
+            leases.release(queue_id, worker_id=self.worker_id, ok=False, error="TIMEOUT")
             self._mark_task_failed(row.payload or {}, "TIMEOUT")
+            self._finalize_task(row.payload or {}, "TIMEOUT")
             try:
                 from ..sse import broker
 
@@ -130,26 +157,38 @@ class Worker:
             except Exception:  # noqa: BLE001
                 pass
         except ApiError as exc:
-            if exc.code == Code.INVALID_STATE_TRANSITION:
-                leases.release(row.id, ok=True)
-            else:
-                log.error("handler_api_error", extra={"object": row.id, "code": exc.code})
-                leases.release(row.id, ok=False, error=exc.message)
-                self._mark_task_failed(row.payload or {}, exc.code)
+            # `INVALID_STATE_TRANSITION` 不再盲判成功：别人已经写过终态不代表本条做完了
+            error_code = "STATE_RACE" if exc.code == Code.INVALID_STATE_TRANSITION else exc.code
+            if exc.code != Code.INVALID_STATE_TRANSITION:
+                log.error("handler_api_error", extra={"object": queue_id, "code": exc.code})
+            leases.release(queue_id, worker_id=self.worker_id, ok=False, error=error_code)
+            self._mark_task_failed(row.payload or {}, error_code)
+            self._finalize_task(row.payload or {}, error_code)
         except Exception as exc:  # noqa: BLE001
-            log.exception("handler_error", extra={"object": row.id, "detail": str(exc)})
-            leases.release(row.id, ok=False, error=str(exc))
+            log.exception("handler_error", extra={"object": queue_id, "detail": str(exc)})
+            leases.release(queue_id, worker_id=self.worker_id, ok=False, error=str(exc))
             self._mark_task_failed(row.payload or {}, "INTERNAL")
+            self._finalize_task(row.payload or {}, "INTERNAL")
         finally:
             lease_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await lease_task
 
-    async def _renew_loop(self, queue_id: str) -> None:
+    @staticmethod
+    def _is_terminal(result: object) -> bool:
+        """handler 返回约定：`{"terminal": True}` 才算做完；`None` 视为历史 handler 的完成。"""
+        if isinstance(result, dict) and "terminal" in result:
+            return bool(result["terminal"])
+        return True
+
+    async def _renew_loop(self, queue_id: str, handler_task: asyncio.Task) -> None:
         while True:
             await asyncio.sleep(HEARTBEAT_S)
             if not leases.renew(queue_id, self.worker_id):
+                # 租约丢失 = 处理权已转移：立刻停手，别和新 owner 抢同一个任务
                 log.error("lease_lost", extra={"object": queue_id})
+                self._lost_leases.add(queue_id)
+                handler_task.cancel()
                 return
 
     @staticmethod
@@ -160,6 +199,17 @@ class Worker:
         try:
             from ..services import tasks
 
+            current = tasks.get(task_id)
+            if current["status"] in ("succeeded", "failed", "canceled"):
+                # 别人（或上一轮）已经写了终态：不要用超时/异常覆盖真实结果
+                log.warning(
+                    "task_failure_skipped",
+                    extra={"object": task_id, "detail": {"status": current["status"], "code": code}},
+                )
+                return
+            if current["status"] == "canceling":
+                # 用户已请求取消：取消意图优先，不要改写成 failed
+                return
             tasks.finish(
                 task_id,
                 status="failed",
@@ -167,6 +217,26 @@ class Worker:
             )
         except Exception:  # noqa: BLE001
             pass
+
+    @staticmethod
+    def _finalize_task(payload: dict, code: str) -> None:
+        """超时/异常/租约丢失后的收口：释放五层并发 + 回写调用记录（§A.3.4 / §A.3.1-2）。
+
+        `tasks.finish(failed)` 只改任务行，不会动并发计数与 `call_logs`，
+        这里补上（两个入口都幂等，重复调用返回 0/False，不会把计数减成负数）。
+        """
+        task_id = payload.get("task_id")
+        if not task_id:
+            return
+        try:
+            from ..services import execution
+
+            execution.release_task_quota({"id": task_id})
+            execution.finalize_task_call(task_id)
+        except Exception as exc:  # noqa: BLE001 - 收口失败不能把 worker 循环打断
+            log.warning(
+                "task_finalize_failed", extra={"object": task_id, "detail": {"code": code, "error": str(exc)}}
+            )
 
     async def run_once(self, kinds: list[str] | None = None) -> int:
         """单次领取执行（测试与运维手工触发）。"""

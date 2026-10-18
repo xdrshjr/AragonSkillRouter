@@ -17,15 +17,32 @@
  */
 
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { dirname, isAbsolute, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
-import { ConfigError, loadConfig, type Config } from './config.js';
+import {
+  PathEscapeError,
+  buildArtifact,
+  findVerifyScript,
+  isInsideRoot,
+  verifyArtifact,
+  type ArtifactDeps,
+} from './artifact.js';
+import {
+  ConfigError,
+  engineResolvedPath,
+  loadConfig,
+  maintenanceEnabled,
+  readEnginePointer,
+  type Config,
+} from './config.js';
 import { EngineManager, TurnConflictError, EngineUnavailableError, describeError } from './engine.js';
 import { buildHealthReport } from './health.js';
 import { PlatformClient } from './platform-client.js';
 import { loadPolicy, PolicyError } from './policy.js';
 import type { SseSink } from './sse.js';
-import type { Logger, TurnRequest } from './types.js';
+import type { BuildRequest, Logger, ReloadRequest, TurnRequest, VerifyRequest } from './types.js';
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 } as const;
 
@@ -52,6 +69,8 @@ export interface GatewayOptions {
   logger?: Logger;
   /** Injection seam for tests; defaults to a real `EngineManager`. */
   engine?: EngineManager;
+  /** Injection seam for the artifact endpoints (build/verify runner). */
+  artifactDeps?: Partial<ArtifactDeps>;
 }
 
 export interface Gateway {
@@ -88,9 +107,40 @@ function replySink(reply: FastifyReply): SseSink {
   };
 }
 
+/**
+ * Resolve which source currently decides the engine pin.
+ *
+ * Re-read on every `/healthz` call: the platform writes `current.json` during a hot
+ * switch, so the boot-time conclusion goes stale and would misreport `pin_source`
+ * (spec §A.5.3 / T-47 -- the "installed but inert" probe must not lie).
+ */
+function livePinSource(config: Config): { pinSource: 'pointer' | 'env'; version: string } {
+  const read = readEnginePointer(config.engineRuntimeDir, config.engineHomeRoot);
+  if (read.pointer !== null) {
+    return { pinSource: 'pointer', version: read.pointer.version };
+  }
+  return { pinSource: 'env', version: config.enginePin };
+}
+
 export function buildGateway(options: GatewayOptions): Gateway {
   const { config } = options;
   const logger = options.logger ?? createLogger(config.logLevel);
+  // Every artifact path must live under the shared data volume (`/data` in containers).
+  const dataRoot = resolve(dirname(config.buildsDir));
+  const artifactDeps: ArtifactDeps = {
+    buildsDir: config.buildsDir,
+    dataRoot,
+    verifyScript: findVerifyScript(
+      [
+        process.env['AGENT_VERIFY_ARTIFACT_SCRIPT'] ?? '',
+        resolve(process.cwd(), 'scripts', 'verify_artifact.mjs'),
+        '/app/scripts/verify_artifact.mjs',
+        resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'verify_artifact.mjs'),
+      ].filter((candidate) => candidate !== ''),
+    ),
+    logger: logger.child({ component: 'artifact' }),
+    ...options.artifactDeps,
+  };
   const platform = new PlatformClient({
     internalUrl: config.internalUrl,
     sharedSecret: config.sharedSecret,
@@ -141,7 +191,16 @@ export function buildGateway(options: GatewayOptions): Gateway {
 
   // -- health ---------------------------------------------------------------
   app.get('/healthz', async (_request, reply) => {
-    const report = buildHealthReport({ engine, pin: config.enginePin });
+    // pin_source 必须在**请求时**从指针文件重新解析：热切换之后启动时的结论已过期，
+    // 否则「装了但没生效」的排查入口会给出错误答案（§A.5.3 / T-47）。
+    const live = livePinSource(config);
+    const report = buildHealthReport({
+      engine,
+      pin: live.version || config.enginePin,
+      pinSource: live.pinSource,
+      resolvedPath: engineResolvedPath(config, live.version || config.enginePin),
+      maintenance: maintenanceEnabled(config),
+    });
     return reply.code(200).send(report);
   });
 
@@ -276,31 +335,113 @@ export function buildGateway(options: GatewayOptions): Gateway {
     }
   });
 
-  // -- engine hot reload (spec §7.12-6 / §12.4-4) ----------------------------
+  // -- engine hot reload (spec §7.12-6 / §12.4-4 / §A.5.3) --------------------
   app.post('/internal/admin/reload', async (request, reply) => {
-    const body = request.body;
-    const target = (body as { target_version?: unknown } | null)?.target_version;
+    const body = (request.body ?? {}) as ReloadRequest;
+    const target = typeof body.version === 'string' ? body.version : body.target_version;
     if (typeof target !== 'string' || target.trim() === '') {
       return reply
         .code(400)
-        .send(errorBody(request, 'INVALID_BODY', 'target_version is required (exact semver, e.g. "0.2.37")'));
+        .send(errorBody(request, 'INVALID_BODY', 'version is required (exact semver, e.g. "0.2.37")'));
     }
+    const engineHome = typeof body.engine_home === 'string' ? body.engine_home.trim() : '';
+    if (engineHome !== '' && (!isAbsolute(engineHome) || !isInsideRoot(dataRoot, engineHome))) {
+      return reply
+        .code(400)
+        .send(
+          errorBody(
+            request,
+            'INVALID_PATH',
+            `engine_home must be an absolute path under ${dataRoot} (got ${JSON.stringify(engineHome)})`,
+          ),
+        );
+    }
+    const previousVersion = engine.identity().version;
     try {
-      const result = await engine.reload(target.trim());
+      const result = await engine.reload(target.trim(), engineHome === '' ? undefined : engineHome);
+      const enriched = {
+        ...result,
+        previous_version: previousVersion,
+        // A caller-supplied home is the platform's pointer decision; otherwise the
+        // gateway's own boot-time resolution stands (spec §A.5.3).
+        pin_source: engineHome === '' ? config.pinSource : ('pointer' as const),
+        ...(engineHome === '' ? {} : { engine_home: engineHome }),
+      };
       logger[result.ok ? 'info' : 'warn']('engine.reload', {
         request_id: request.id,
         ok: result.ok,
         stage: result.stage,
         engine_version: result.engine_version,
+        previous_version: previousVersion,
+        engine_home: engineHome === '' ? undefined : engineHome,
         detail: result.detail,
       });
-      return reply.code(200).send(result);
+      return reply.code(200).send(enriched);
     } catch (err) {
       if (err instanceof EngineUnavailableError) {
         return reply.code(503).send(errorBody(request, 'ENGINE_UNAVAILABLE', err.detail));
       }
       logger.error('engine.reload_failed', { request_id: request.id, error: describeError(err) });
       return reply.code(500).send(errorBody(request, 'RELOAD_FAILED', describeError(err)));
+    }
+  });
+
+  // -- isolated build (spec §A.3.7-0 / §A.5.3) --------------------------------
+  app.post('/internal/admin/build', async (request, reply) => {
+    const body = (request.body ?? {}) as BuildRequest;
+    if (typeof body.version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(body.version)) {
+      return reply
+        .code(400)
+        .send(errorBody(request, 'INVALID_BODY', 'version must be an exact semver (e.g. "0.2.37")'));
+    }
+    try {
+      const result = await buildArtifact(body, artifactDeps);
+      logger[result.ok ? 'info' : 'warn']('artifact.build', {
+        request_id: request.id,
+        version: body.version,
+        status: result.status,
+        stage: result.stage,
+      });
+      return reply.code(200).send(result);
+    } catch (err) {
+      if (err instanceof PathEscapeError) {
+        return reply.code(400).send(errorBody(request, 'INVALID_PATH', err.message));
+      }
+      logger.error('artifact.build_failed', { request_id: request.id, error: describeError(err) });
+      return reply.code(500).send(errorBody(request, 'BUILD_FAILED', describeError(err)));
+    }
+  });
+
+  // -- artifact verification (spec §A.3.7-1 / §A.5.3) ------------------------
+  app.post('/internal/admin/verify-artifact', async (request, reply) => {
+    const body = (request.body ?? {}) as VerifyRequest;
+    const artifactDir = typeof body.artifact_dir === 'string' ? body.artifact_dir.trim() : '';
+    if (artifactDir === '' || !isAbsolute(artifactDir) || !isInsideRoot(dataRoot, artifactDir)) {
+      return reply
+        .code(400)
+        .send(
+          errorBody(
+            request,
+            'INVALID_PATH',
+            `artifact_dir must be an absolute path under ${dataRoot} (got ${JSON.stringify(artifactDir)})`,
+          ),
+        );
+    }
+    const expected = Array.isArray(body.expected_symbols) ? body.expected_symbols.map(String) : [];
+    try {
+      const result = await verifyArtifact(artifactDir, expected, artifactDeps);
+      logger[result.status === 'passed' ? 'info' : 'warn']('artifact.verify', {
+        request_id: request.id,
+        status: result.status,
+        checks: result.checks.map((check) => `${check.check}:${check.status}`),
+      });
+      return reply.code(200).send(result);
+    } catch (err) {
+      if (err instanceof PathEscapeError) {
+        return reply.code(400).send(errorBody(request, 'INVALID_PATH', err.message));
+      }
+      logger.error('artifact.verify_failed', { request_id: request.id, error: describeError(err) });
+      return reply.code(500).send(errorBody(request, 'VERIFY_FAILED', describeError(err)));
     }
   });
 
@@ -340,8 +481,22 @@ function errorBody(request: FastifyRequest, code: string, message: string): Reco
 
 /** Boot the gateway: config → policy → engine → HTTP listener. */
 export async function startGateway(env: NodeJS.ProcessEnv = process.env): Promise<Gateway> {
-  const config = loadConfig(env);
+  // The logger must exist BEFORE `loadConfig()`: a broken engine pointer is logged there
+  // (`engine_pointer_invalid`) and "not silently" is the whole point (spec §A.3.7-4).
+  const bootstrapLevel = (env['AGENT_GATEWAY_LOG_LEVEL'] ?? 'info').trim().toLowerCase();
+  const bootstrapLogger = createLogger(
+    (['debug', 'info', 'warn', 'error'].includes(bootstrapLevel) ? bootstrapLevel : 'info') as keyof typeof LEVELS,
+    { component: 'gateway' },
+  );
+  const config = loadConfig(env, bootstrapLogger);
   const logger = createLogger(config.logLevel, { component: 'gateway' });
+  if (config.pinSource === 'pointer') {
+    logger.info('engine.pointer_used', {
+      version: config.enginePin,
+      env_pin: config.enginePinEnv,
+      runtime_dir: config.engineRuntimeDir,
+    });
+  }
 
   // Fail fast on a broken policy: a gateway that silently registered nothing (or
   // everything) would be a permission bug, so this is a startup error, not a warning.
@@ -364,6 +519,7 @@ export async function startGateway(env: NodeJS.ProcessEnv = process.env): Promis
     bind: config.bind,
     port: config.port,
     pin: config.enginePin,
+    pin_source: config.pinSource,
     engine: status.availability,
     mode: config.engineMode,
     ...(status.detail === undefined ? {} : { detail: status.detail }),

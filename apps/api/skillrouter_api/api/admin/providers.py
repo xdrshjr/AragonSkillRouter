@@ -1,4 +1,4 @@
-"""提供商与凭证路由（§9.2）。"""
+"""提供商与凭证路由（§9.2 / §A.3.11）。"""
 
 from __future__ import annotations
 
@@ -18,6 +18,9 @@ from ...security.sessions import SessionContext
 from ...services import credentials, credentials_verify, providers
 
 router = APIRouter(tags=["providers"])
+
+#: `GET /credentials` 的 `sort` 白名单（§A.3.11）
+CREDENTIAL_SORT_FIELDS = ("name", "created_at", "expires_at", "last_verified_at")
 
 
 # ── 提供商 ───────────────────────────────────────────────────
@@ -91,8 +94,30 @@ async def list_credentials(
     paging: dict = Depends(page_params),
     ctx: SessionContext = Depends(require_password_changed),
 ) -> dict:
+    """分页 + `sort`（白名单）+ `status=expiring`（≤7 天）+ `q`（name/kind/provider_name）。
+
+    字段投影由 `services/credentials.py` 单点负责（`secret_mask`/`secret_fingerprint`/…），
+    这里只做查询参数、白名单校验与「服务层不支持的那两维」的本地筛选。
+    """
+    sort = paging["sort"]
+    if sort:
+        for token in [part.strip() for part in str(sort).split(",") if part.strip()]:
+            field = token.lstrip("-+")
+            if field not in CREDENTIAL_SORT_FIELDS:
+                raise ApiError(
+                    Code.VALIDATION_FAILED,
+                    message=f"不支持的排序字段：{field}",
+                    details={"allowed": list(CREDENTIAL_SORT_FIELDS)},
+                )
+    # q / status=expiring / provider_name 全部在服务层做（含 JOIN providers）：
+    # 曾经在这里只取前 100 条再本地筛选，超过 100 条凭证时「即将过期」会漏、搜索会漏、total 也会错。
     return credentials.list_credentials(
-        q=q, status=status, kind=kind, page=paging["page"], page_size=paging["page_size"], sort=paging["sort"]
+        q=q,
+        status=status,
+        kind=kind,
+        page=paging["page"],
+        page_size=paging["page_size"],
+        sort=sort,
     )
 
 

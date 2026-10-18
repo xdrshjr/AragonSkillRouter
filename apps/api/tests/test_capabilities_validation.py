@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 from tests.fixtures.builders import capability_payload
+from tests.fixtures.fake_upstream import FakeUpstream, patch_httpx
 
 
 def _validate(client, admin, capability_id):
     r = client.post(f"/api/admin/capabilities/{capability_id}/validate", headers=admin["headers"])
     assert r.status_code == 200
     return r.json()
+
+
+def _brief_item(client, admin, capability_key: str) -> dict:
+    """按 key 过滤能力列表，取回 `_brief()` 产出的那一条（断言口径即前端读到的字段）。"""
+    r = client.get("/api/admin/capabilities", headers=admin["headers"], params={"q": capability_key})
+    assert r.status_code == 200, r.text
+    items = [i for i in r.json()["items"] if i["key"] == capability_key]
+    assert items, r.text
+    return items[0]
 
 
 def _codes(result: dict, level: str = "error") -> list[str]:
@@ -212,3 +222,102 @@ def test_duplicate_route_id_rejected(client, admin, provider, credential, make_c
     assert r.status_code == 201
     result = _validate(client, admin, r.json()["id"])
     assert result["ok"] is False
+
+
+# ── §A.3.1 / T-01 · T-02 ─────────────────────────────────────
+
+
+def test_test_result_shape_matches_frontend_contract(
+    client, admin, make_capability, monkeypatch
+) -> None:
+    """T-01：测试返回体的键集合冻结；`test_runs[].ok` 必须是 JSON boolean。"""
+    patch_httpx(monkeypatch, FakeUpstream())
+    cap = make_capability()
+    r = client.post(
+        f"/api/admin/capabilities/{cap['id']}/test",
+        headers=admin["headers"],
+        json={"input": {"prompt": "契约"}},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    expected = {
+        "test_run_id",
+        "status",
+        "http_status",
+        "latency_ms",
+        "response_preview",
+        "output",
+        "error",
+        "used_route",
+        "dropped",
+    }
+    assert set(body) == expected, set(body) ^ expected
+    assert "ok" not in body and "route" not in body
+    assert body["status"] == "succeeded"
+    assert body["used_route"]["route_id"] == "rt_primary"
+    assert isinstance(body["dropped"], list)
+
+    detail = client.get(f"/api/admin/capabilities/{cap['id']}", headers=admin["headers"]).json()
+    assert detail["test_runs"], detail
+    for run in detail["test_runs"]:
+        assert isinstance(run["ok"], bool), "ok 必须是 JSON boolean，不是 1/0"
+    assert detail["test_runs"][0]["ok"] is True
+
+
+def test_brief_exposes_test_and_success_metrics(client, admin, make_capability, monkeypatch) -> None:
+    """T-02：4 个列表指标的口径（含「无调用 → null 而不是 0」）。"""
+    from datetime import datetime, timezone
+
+    from skillrouter_api.db import db_write, uuid_pk
+    from skillrouter_api.models import CallLog
+
+    patch_httpx(monkeypatch, FakeUpstream())
+    cap = make_capability()
+
+    # 从未测试、从未调用
+    item = _brief_item(client, admin, cap["key"])
+    assert item["last_test_ok"] is None
+    assert item["last_test_at"] is None
+    assert item["success_rate_24h"] is None, "无调用时必须是 null，不是 0"
+    assert item["call_count_24h"] == 0
+
+    # 造 3 次调用 2 成功（落库 status='success'，即 LOGGED_STATUS['succeeded']）
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with db_write() as s:
+        for status in ("success", "success", "failed"):
+            s.add(
+                CallLog(
+                    id=uuid_pk("cal"),
+                    request_id=uuid_pk("req"),
+                    caller_type="token",
+                    capability_key=cap["key"],
+                    mode="sync",
+                    status=status,
+                    created_at=now,
+                )
+            )
+    item = _brief_item(client, admin, cap["key"])
+    assert item["call_count_24h"] == 3
+    assert abs(item["success_rate_24h"] - 2 / 3) < 1e-3, item["success_rate_24h"]
+
+    # 测试通过 → last_test_ok 为 True（JSON boolean）
+    r = client.post(
+        f"/api/admin/capabilities/{cap['id']}/test",
+        headers=admin["headers"],
+        json={"input": {"prompt": "指标"}},
+    )
+    assert r.status_code == 200 and r.json()["status"] == "succeeded", r.text
+    item = _brief_item(client, admin, cap["key"])
+    assert item["last_test_ok"] is True
+    assert item["last_test_at"], "最近一次测试时间必须回填"
+    # 详情页与列表读同一口径
+    detail = client.get(f"/api/admin/capabilities/{cap['id']}", headers=admin["headers"]).json()
+    assert detail["last_test_ok"] is True
+    assert detail["call_count_24h"] == 3
+
+    # 另一个能力（无调用）不得被别人的调用污染
+    other = make_capability()
+    other_item = _brief_item(client, admin, other["key"])
+    assert other_item["success_rate_24h"] is None
+    assert other_item["call_count_24h"] == 0
+

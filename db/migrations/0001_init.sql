@@ -1,5 +1,5 @@
 -- Skill Router 初始 schema 快照（与 Alembic 0001_init 对齐，便于人工审阅）
--- user_version=1；alembic_version=['0002_engine_upgrade']
+-- user_version=2；alembic_version=['0003_iteration2']
 -- 权威来源：apps/api/migrations/versions/0001_init.py。本文件只读，不参与迁移。
 
 CREATE TABLE admin_sessions (
@@ -179,6 +179,7 @@ CREATE TABLE call_logs (
 	credential_id VARCHAR(64), 
 	mode VARCHAR(16) NOT NULL, 
 	status VARCHAR(24) NOT NULL, 
+	needs_reconcile INTEGER NOT NULL, 
 	http_status INTEGER, 
 	error_code VARCHAR(64), 
 	latency_ms INTEGER, 
@@ -325,6 +326,7 @@ CREATE TABLE credentials (
 	secret_mask VARCHAR(64) NOT NULL, 
 	secret_fingerprint VARCHAR(32) NOT NULL, 
 	meta JSON NOT NULL, 
+	meta_sealed TEXT, 
 	status VARCHAR(16) NOT NULL, 
 	expires_at VARCHAR(32), 
 	last_verified_at VARCHAR(32), 
@@ -385,6 +387,8 @@ CREATE TABLE engine_upgrade_runs (
 	started_at VARCHAR(32) NOT NULL, 
 	finished_at VARCHAR(32), 
 	result VARCHAR(16), 
+	verify_status VARCHAR(16), 
+	blocked_reasons JSON NOT NULL, 
 	steps JSON NOT NULL, 
 	error TEXT, 
 	backup_file_id VARCHAR(64), 
@@ -428,6 +432,7 @@ CREATE TABLE idempotency_keys (
 	fingerprint VARCHAR(64) NOT NULL, 
 	request_id VARCHAR(64) NOT NULL, 
 	capability_key VARCHAR(128), 
+	state VARCHAR(16) NOT NULL, 
 	created_at VARCHAR(32) NOT NULL, 
 	expires_at VARCHAR(32) NOT NULL, 
 	id VARCHAR(64) NOT NULL, 
@@ -694,6 +699,7 @@ CREATE TABLE tasks (
 	error_code VARCHAR(64), 
 	error_detail_redacted TEXT, 
 	cancel_capability VARCHAR(16) NOT NULL, 
+	cancel_requested_at VARCHAR(32), 
 	result JSON NOT NULL, 
 	output_files JSON NOT NULL, 
 	token_id VARCHAR(64), 
@@ -759,11 +765,13 @@ CREATE INDEX ix_files_expires ON file_objects (expires_at);
 CREATE INDEX ix_files_owner ON file_objects (owner_type, owner_id);
 CREATE INDEX ix_files_sha ON file_objects (sha256);
 CREATE INDEX ix_idem_expires ON idempotency_keys (expires_at);
+CREATE INDEX ix_idem_state ON idempotency_keys (state, expires_at);
 CREATE INDEX ix_login_attempts_ip ON login_attempts (ip, at);
 CREATE INDEX ix_login_attempts_user ON login_attempts (username, at);
 CREATE INDEX ix_skills_status ON skills (status, enabled);
 CREATE INDEX ix_sse_stream ON sse_events (stream_key, id);
 CREATE INDEX ix_task_queue_pick ON task_queue (status, available_at);
+CREATE INDEX ix_tasks_cancel_req ON tasks(status, cancel_requested_at);
 CREATE INDEX ix_tasks_request ON tasks (request_id);
 CREATE INDEX ix_tasks_status ON tasks (status, updated_at);
 CREATE INDEX ix_tasks_upstream ON tasks (upstream_task_id);

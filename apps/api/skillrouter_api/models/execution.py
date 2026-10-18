@@ -20,6 +20,7 @@ class CallLog(Base, IdMixin):
     credential_id: Mapped[str | None] = mapped_column(String(64))
     mode: Mapped[str] = mapped_column(String(16), default="sync", nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="success", nullable=False)
+    needs_reconcile: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     http_status: Mapped[int | None] = mapped_column(Integer)
     error_code: Mapped[str | None] = mapped_column(String(64))
     latency_ms: Mapped[int | None] = mapped_column(Integer)
@@ -109,12 +110,15 @@ class IdempotencyKey(Base, IdMixin):
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     request_id: Mapped[str] = mapped_column(String(64), nullable=False)
     capability_key: Mapped[str | None] = mapped_column(String(128))
+    #: 幂等三态：`in_flight`（已占位执行中）/ `done`（可回放，含历史行默认值）
+    state: Mapped[str] = mapped_column(String(16), default="done", nullable=False)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False)
     expires_at: Mapped[str] = mapped_column(String(32), nullable=False)
 
     __table_args__ = (
         Index("uq_idem_scope_key", "scope", "idem_key", unique=True),
         Index("ix_idem_expires", "expires_at"),
+        Index("ix_idem_state", "state", "expires_at"),
     )
 
 
@@ -136,6 +140,8 @@ class Task(Base, IdMixin):
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_detail_redacted: Mapped[str | None] = mapped_column(Text)
     cancel_capability: Mapped[str] = mapped_column(String(16), default="none", nullable=False)
+    #: 用户请求取消的时刻；`status='canceling'` ⇔ 本列非空（不变式 I2）
+    cancel_requested_at: Mapped[str | None] = mapped_column(String(32))
     result: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     output_files: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     token_id: Mapped[str | None] = mapped_column(String(64))

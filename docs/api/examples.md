@@ -3,7 +3,11 @@
 > 目标是**可复制即用**。示例里的 `https://router.example.com`、`srk_xxx_yyy`、能力 key
 > 都是占位符，替换成你自己的值即可。
 > 示例覆盖：health、whoami、capabilities（list/get）、invoke（sync / async / stream）、
-> task status / cancel、file upload、skills（list / read / bundle）、MCP（initialize / tools.list / tools.call）。
+> task status / cancel、file upload + 签名下载、skills（list / read / bundle）、MCP（initialize / tools.list / tools.call）、
+> 管理端 tasks 列表与备份（POST）。
+>
+> **令牌只用请求头**：`Authorization: Bearer <token>`。把令牌放进查询串的旧通道（`token` 查询参数）
+> 默认关闭，传了会返回 `400 TOKEN_INVALID`；逃生阀 `SKILLROUTER_ALLOW_QUERY_TOKEN` 见 §0 表格最后一行。
 
 ## 0. 约定（读一次就够）
 
@@ -17,6 +21,8 @@
 | 分页 | `?page=1&page_size=20&sort=-created_at&q=&status=` → `{items,page,page_size,total}` | §9.1 |
 | 时间 | 全部 UTC ISO8601（`2026-10-18T05:41:25.072Z`） | — |
 | 模式 | `options.mode ∈ capability.modes`（`sync / async / stream`），省略取 `modes[0]` | §9.3 |
+| 令牌位置 | **只在请求头**。查询串通道默认关闭（`400 TOKEN_INVALID`）；`SKILLROUTER_ALLOW_QUERY_TOKEN=1` 才恢复，且每次用都会记一条 `query_token_used` 告警 | §A.3.3 |
+| 维护模式 | 恢复备份期间所有写请求与 invoke 返回 `503 MAINTENANCE`；`GET /healthz` 的 `maintenance` 为 `true` | §A.3.13 |
 
 Shell 差异（同一串命令在三种终端里的写法）：
 
@@ -74,11 +80,25 @@ export SR_BASE="https://router.example.com"
 
 ```bash
 curl -sS "$SR_BASE/api/v1/health"
+# 运维探针用 /healthz（同域、不带 /api/v1），额外给 db/initialized/maintenance 三个字段
+curl -sS "$SR_BASE/healthz"
 ```
 
 ```json
-{"status":"ok","version":"0.1.0","engine":{"version":"0.2.34","status":"available"},"time":"2026-10-18T05:41:25Z"}
+{"status":"ok","version":"0.1.0",
+ "engine":{"version":"0.2.34","status":"declared","note":"本端点是声明值，实际以 /settings/engine 为准"},
+ "schema_version":3,"time":"2026-10-18T05:41:25Z"}
 ```
+
+```json
+// GET /healthz
+{"ok":true,"service":"skillrouter-api","version":"0.1.0","env":"production",
+ "db":{"ok":true,"schema_version":3,"error":null},"initialized":true,
+ "engine_pin":"0.2.34@0a119a6","maintenance":false,"time":"2026-10-18T05:41:25Z"}
+```
+
+> `status` 只有 `ok` / `initializing`；`maintenance: true` 表示正在恢复备份，此时写请求与
+> invoke 都会 `503 MAINTENANCE`（读请求放行）。
 
 ```ts
 // TypeScript（Node ≥ 18，内置 fetch）
@@ -113,21 +133,28 @@ curl -sS "$SR_BASE/api/v1/whoami" -H "Authorization: Bearer $SR_TOKEN"
 
 ```json
 {
-  "token": {"id": "tok_1", "prefix": "srk_k1_x", "agent": "laptop-aragon"},
+  "token_id": "tok_1",
+  "agent": {"id": "agt_1", "name": "laptop-aragon"},
+  "prefix": "srk_k1_x",
   "scopes": {"capabilities": ["text.generate.*", "image.generate.kling"], "skills": ["*"]},
-  "quota": {"rpm": 60, "daily_calls_used": 128, "daily_calls_limit": 5000,
-            "monthly_budget_usd": 20.0, "monthly_spent_usd": 3.41}
+  "allowed_modes": ["sync", "async"],
+  "limits": {"rpm": 60, "concurrency": 4, "daily_calls": 5000, "budget_usd": 20.0},
+  "expires_at": null,
+  "usage": {"calls_today": 128, "cost_month_usd": 3.41, "calls_this_minute": 2, "concurrent": 1}
 }
 ```
 
+> `limits` 是**配置**，`usage` 是**实际用量**（读 `quota_counters` / `rate_counters`）。
+> 成本只在 `quota_counters.cost_usd` 上累计，`rate_counters` 只记 `calls`/`concurrent`。
+
 ```ts
 const who = await fetch(`${base}/api/v1/whoami`, { headers: auth() }).then((r) => r.json());
-console.log(who.quota.monthly_spent_usd, '/', who.quota.monthly_budget_usd);
+console.log(who.usage.cost_month_usd, '/', who.limits.budget_usd);
 ```
 
 ```python
 who = httpx.get(f"{SR_BASE}/api/v1/whoami", headers=AUTH, timeout=10).json()
-print(who["quota"])
+print(who["usage"], who["limits"])
 ```
 
 ## 4. `GET /api/v1/capabilities`（目录，带 ETag）
@@ -238,6 +265,8 @@ curl -sS -X POST "$SR_BASE/api/v1/capabilities/text.generate.gpt4o-mini/invoke" 
 {
   "request_id": "req_01J9Z8W3",
   "status": "succeeded",
+  "status_unknown": false,
+  "needs_reconcile": false,
   "capability": {"key": "text.generate.gpt4o-mini", "version": "1.2.0"},
   "provider": {"id": "prv_openai", "name": "OpenAI"},
   "output": {"text": "……"},
@@ -249,17 +278,40 @@ curl -sS -X POST "$SR_BASE/api/v1/capabilities/text.generate.gpt4o-mini/invoke" 
 }
 ```
 
+`status ∈ {succeeded, failed, status_unknown}`（§A.10）。两个布尔字段是**给机器的**判定位，不要用它们
+去猜 `status` 之外的东西：
+
+| 字段 | 含义 | 你该做什么 |
+|---|---|---|
+| `status_unknown: true` | 无法判定上游是否受理（超时发生在**提交过程中**），`status` 同时是 `status_unknown` | **不要重投**（可能重复扣费）：先 `POST /api/admin/tasks/{id}/reconcile` |
+| `needs_reconcile: true` | 本次调用被标记为需要人工对账（`call_logs.needs_reconcile=1`），概览页「待对账调用」会显示 | 同上；确认上游无记录后再重发 |
+
+失败样例（`status: failed`，`error` 为错误映射后的对象，`retryable` 决定能否重试）：
+
+```json
+{"request_id":"req_01J9Z8X1","status":"failed","status_unknown":false,"needs_reconcile":false,
+ "capability":{"key":"text.generate.gpt4o-mini","version":"1.2.0"},
+ "provider":{"id":"prv_openai","name":"OpenAI"},"output":null,"output_files":[],
+ "usage":null,"timings":{"queue_ms":3,"upstream_ms":30021,"total_ms":30024},
+ "error":{"code":"UPSTREAM_TIMEOUT","message":"上游超时","hint":"查任务状态，勿重复提交","retryable":true}}
+```
+
 ```ts
-type InvokeOk = {
+type InvokeResult = {
   request_id: string;
-  status: 'succeeded';
-  output: Record<string, unknown>;
-  output_files: { file_id: string; mime: string; size: number }[];
-  usage?: { unit: string; total?: number; cost_usd?: number; source: 'provider' | 'estimated' };
+  // 注意：三态。`status_unknown` 不是失败，不要在这里重试。
+  status: 'succeeded' | 'failed' | 'status_unknown';
+  status_unknown: boolean;
+  needs_reconcile: boolean;
+  output: Record<string, unknown> | null;
+  // 每个文件都带 10 分钟有效的签名 URL（下载不需要令牌）
+  output_files: { file_id: string; mime: string; size: number; signed_url?: string; expires_at?: number }[];
+  usage?: { unit: string; total?: number; cost_usd?: number; source: 'provider' | 'estimated' | 'unknown' | 'probe' } | null;
   timings?: { queue_ms?: number; upstream_ms?: number; total_ms?: number };
+  error: { code: string; message: string; hint?: string; retryable?: boolean } | null;
 };
 
-async function invokeSync(key: string, input: unknown): Promise<InvokeOk> {
+async function invokeSync(key: string, input: unknown): Promise<InvokeResult> {
   const res = await fetch(`${base}/api/v1/capabilities/${key}/invoke`, {
     method: 'POST',
     headers: { ...auth(), 'Content-Type': 'application/json' },
@@ -271,7 +323,15 @@ async function invokeSync(key: string, input: unknown): Promise<InvokeOk> {
     const { code, hint, request_id } = body.error;
     throw Object.assign(new Error(`${code}: ${hint ?? ''}`), { code, request_id });
   }
-  return body as InvokeOk;
+  const result = body as InvokeResult;
+  if (result.status === 'status_unknown' || result.needs_reconcile) {
+    // 结果不确定：交给对账接口，绝不自动重投（重复扣费风险）
+    throw Object.assign(new Error(`结果不确定，请对账：${result.request_id}`), {
+      code: 'STATUS_UNKNOWN',
+      request_id: result.request_id,
+    });
+  }
+  return result;
 }
 ```
 
@@ -398,11 +458,13 @@ with httpx.stream("POST",
 ### 6.4 文件输入 / 输出
 
 ```bash
-# 1) 先上传，拿 file_id
+# 1) 先上传，拿 file_id + 可直接用的签名 URL（10 分钟有效、下载免令牌）
 curl -sS -X POST "$SR_BASE/api/v1/files" \
   -H "Authorization: Bearer $SR_TOKEN" \
   -F "file=@./ref.png;type=image/png"
-# → {"file_id":"fil_01J9Z9D0","mime":"image/png","size":184320,"sha256":"...","expires_at":"..."}
+# → {"file_id":"fil_01J9Z9D0","mime":"image/png","size":184320,"sha256":"...",
+#    "filename":"ref.png","kind":"upload","expires_at":null,"created_at":"2026-10-18T05:41:25Z",
+#    "signed_url":"/api/v1/files/fil_01J9Z9D0?sig=<hmac>&exp=1792300885"}
 
 # 2) 用 {"$file": ...} 引用它
 curl -sS -X POST "$SR_BASE/api/v1/capabilities/image.generate.kling/invoke" \
@@ -428,13 +490,28 @@ res = httpx.post(
 ).json()
 ```
 
-文件输出一律走 `output_files[{file_id, mime, size}]`，**不内联 base64**；下载：
+文件输出一律走 `output_files[{file_id, mime, size, signed_url, expires_at}]`，**不内联 base64**。
+两种下载方式（先看有没有签名链接，再考虑令牌）：
 
 ```bash
+# 方式 A（推荐给浏览器/前端 <img>/<a>）：签名 URL，**不需要任何令牌**
+#   signed_url 是相对路径，前面拼上 $SR_BASE 即可
+curl -sS -L "$SR_BASE$(echo '<signed_url>')" -o out.png
+
+# 方式 B（服务端调用）：带平台令牌，需要 files:read 作用域
 curl -sS -L "$SR_BASE/api/v1/files/fil_01J9Z9D1" \
   -H "Authorization: Bearer $SR_TOKEN" -o out.png
-# 预览可用签名 URL（10 分钟有效，无需令牌）：/api/v1/files/{id}?sig=...&exp=...
 ```
+
+签名的三个坑（§A.3.10）：
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| `401 UNAUTHENTICATED` + hint「链接已过期」 | 签名 URL 有效期只有 **10 分钟**（`exp` 是 Unix 秒） | 重新取一次 `output_files[].signed_url`（任务详情/调用响应里都有），或改用令牌 |
+| `401 UNAUTHENTICATED` + hint「缺少 Authorization 头」 | 没带签名也没带令牌 | 二选一 |
+| `403 TOKEN_SCOPE_DENIED` | 令牌没有 `files:read` | 管理端给令牌加作用域；或改用签名 URL |
+
+> 以前无效/过期签名返回 `404`，会被误读成「文件不存在」；本轮统一为 **401** 并在 hint 里区分原因。
 
 ## 7. 任务：`GET /api/v1/tasks/{task_id}` / `POST .../cancel`
 
@@ -443,18 +520,43 @@ curl -sS "$SR_BASE/api/v1/tasks/tsk_01J9Z9AB" -H "Authorization: Bearer $SR_TOKE
 ```
 
 ```json
-{"task_id":"tsk_01J9Z9AB","status":"running","progress":{"percent":42,"stage":"upstream_polling"},
- "upstream_task_id":"kling-9f2","created_at":"2026-10-18T05:42:00Z","error":null}
+{"task_id":"tsk_01J9Z9AB","request_id":"req_01J9Z9AA","capability_key":"image.generate.kling",
+ "mode":"async","status":"running","status_detail":"上游处理中",
+ "progress":{"percent":42,"stage":"upstream_polling"},"upstream_task_id":"kling-9f2",
+ "attempts":0,"max_attempts":3,"failure_class":null,"cancel_capability":"remote",
+ "cancel_requested_at":null,"cancel_scope":"none","resume_policy":"poll",
+ "error":null,"result":{},"output_files":[],
+ "created_at":"2026-10-18T05:42:00Z","updated_at":"2026-10-18T05:42:31Z","finished_at":null}
 ```
 
 `status ∈ queued | running | succeeded | failed | canceling | canceled | canceled_local | status_unknown`
+（`status_unknown` 表示无法判定上游是否受理，见 §6.1 的对账说明）。
+
+取消语义（§A.10 / §A.3.6）：`cancel_scope ∈ {none, remote, local_only, pending_submit}`，
+**`pending_submit` 时 HTTP 状态码是 `202`**（其余情况 `200`）：
 
 ```bash
-curl -sS -X POST "$SR_BASE/api/v1/tasks/tsk_01J9Z9AB/cancel" \
+curl -sS -i -X POST "$SR_BASE/api/v1/tasks/tsk_01J9Z9AB/cancel" \
   -H "Authorization: Bearer $SR_TOKEN"
-# 上游支持取消 → {"task_id":"...","status":"canceling","cancel_scope":"remote"}
-# 上游不支持   → 409 CANCEL_UNSUPPORTED（本地已停止等待，远端可能仍在跑）
+
+# A) 上游已受理 → 200，真的能停
+# {"ok":true,"task_id":"tsk_01J9Z9AB","status":"canceling","cancel_scope":"remote",
+#  "cancel_requested_at":"2026-10-18T05:43:02Z"}
+# B) 上游不支持取消 → 409 CANCEL_UNSUPPORTED（本地已停止等待，远端可能仍在跑）
+# C) 子任务刚起、还没提交给上游 → 202，按「提交前取消」处理
+# HTTP/1.1 202 Accepted
+# {"ok":true,"status":"canceling","cancel_scope":"pending_submit",
+#  "cancel_requested_at":"2026-10-18T05:43:02Z","note":"<说明：本地已受理取消，提交中的请求会被追取消>"}
+# D) 只有本地可停 → 200，直接到 canceled + cancel_scope="local_only"（带 upstream_task_id 供人工追）
+# E) 已经终结 → 200 {"ok":false,"status":"succeeded","cancel_scope":"none"}
 ```
+
+| `cancel_scope` | 语义 | 客户端该做什么 |
+|---|---|---|
+| `none` | 没有可取消的东西（已终结） | 不用再轮询 |
+| `remote` | 已向上游发起取消 | 继续轮询到 `canceled` |
+| `local_only` | 上游不支持/不允许取消，本地已停止等待 | 上游可能仍在跑并计费，看 `provider` 账单 |
+| `pending_submit` | 提交前拦下（**202**） | 等 `canceled` 即可，不会再打上游 |
 
 ```python
 import time
@@ -483,6 +585,50 @@ async function waitTask(taskId: string, timeoutMs = 900_000) {
 
 `status_unknown` 的含义：无法判定上游是否受理（例如超时发生在提交过程中）。
 先 `POST /api/admin/tasks/{id}/reconcile` 对账，**不要**直接重投（可能产生重复扣费）。
+
+### 7.1 管理端：`GET /api/admin/tasks`（列表参数，§A.3.11）
+
+```bash
+# 组合：按状态 + 能力 + 关键字搜 request_id/task_id/capability_key/upstream_task_id + 排序 + 翻页
+curl -sS -b cookies.txt \
+  "$SR_BASE/api/admin/tasks?status=unknown&capability_key=image.generate.kling&q=kling-&page=1&page_size=20&sort=-created_at"
+```
+
+| 参数 | 取值 | 说明 |
+|---|---|---|
+| `q` | 任意子串 | 在 `request_id` / `task_id` / `capability_key` / `upstream_task_id` 上做子串匹配（不区分大小写） |
+| `status` | `active` / `unknown` / 具体状态 | `active` = `queued\|running\|canceling` 的合集；`unknown` = `status_unknown`（概览页「待对账调用」就是它） |
+| `capability_key` | 能力 key | 旧参数 `capability` 仍兼容，二者同值 |
+| `page` / `page_size` | ≥1 | 返回 `{items,page,page_size,total}` |
+| `sort` | `created_at` / `updated_at` / `status` | 前加 `-` 表示倒序；**只接受这三个字段**，其余回落到默认值（不做「假排序」） |
+
+```bash
+# 对账：status_unknown 的行用它收口（不会重投上游）
+curl -sS -b cookies.txt -X POST "$SR_BASE/api/admin/tasks/tsk_01J9Z9AB/reconcile" \
+  -H "X-CSRF-Token: <csrf_token>"
+```
+
+### 7.2 管理端备份：`POST /api/admin/settings/backup/now`（同步，立即产出）
+
+```bash
+# 旧接口：POST /api/admin/settings/backup（202，交给 worker 排队）
+curl -sS -b cookies.txt -X POST "$SR_BASE/api/admin/settings/backup" \
+  -H "X-CSRF-Token: <csrf_token>"
+# → {"queued":true,"queue_id":"...","note":"<说明：由 worker 异步执行>"}
+
+# 新接口：POST /api/admin/settings/backup/now（同步执行，返回真实产物名与 sha256）
+curl -sS -b cookies.txt -X POST "$SR_BASE/api/admin/settings/backup/now" \
+  -H "X-CSRF-Token: <csrf_token>"
+```
+
+```json
+{"ok":true,"product":"skillrouter-backup-20261018T054125Z.tar.gz","file_id":"fil_...",
+ "sha256":"9f2c…","size":1843200,"path":"/data/backup/skillrouter-backup-20261018T054125Z.tar.gz",
+ "manifest":{"schema_version":3,"files":[...]},"download_url":"/api/admin/files/fil_..."}
+```
+
+> **旧 `GET /api/admin/settings/backup/now` 已删除**，`GET` 现在返回 `405`：备份是写操作，
+> 必须 POST + `X-CSRF-Token`（防「一个链接就触发备份」）。
 
 ## 8. SKILL：`GET /api/v1/skills` / `{name}` / `{name}/bundle`
 
@@ -594,8 +740,23 @@ export function handleError(status: number, body: any): never {
     case 'TOKEN_REVOKED':
     case 'SESSION_EXPIRED':
       throw new Error(`需要重新认证：${e.code}（request_id=${e.request_id}）`);
+    case 'TOKEN_INVALID':
+      // 令牌只在 Authorization 头里；查询串通道默认关闭（§A.3.3）
+      throw new Error(`令牌无效或位置不对：请用 -H "Authorization: Bearer <token>"`);
     case 'TOKEN_SCOPE_DENIED':
       throw new Error(`令牌作用域不足：${e.code}`);
+    case 'MAINTENANCE':
+      // 平台正在恢复备份：写操作被暂停，退避后重试（读请求照常）
+      throw Object.assign(new Error(`维护中：${e.hint ?? ''}`), { retryable: true, code: e.code });
+    case 'IDEMPOTENCY_IN_PROGRESS':
+      // 同键同体已有请求在飞：等它结束（用同键重试是安全的，不要换键）
+      throw Object.assign(new Error('同一幂等键的请求正在处理中，请稍后用同一键重试'), {
+        retryable: true,
+        code: e.code,
+      });
+    case 'LEASE_LOST':
+      // 任务租约被其他 worker 接手：不是失败，任务会被重新执行
+      throw Object.assign(new Error('任务处理权已转移，稍后查任务状态'), { code: e.code });
     case 'QUOTA_EXCEEDED':
     case 'BUDGET_EXCEEDED':
     case 'UPSTREAM_RATE_LIMIT':
@@ -618,6 +779,7 @@ CODE_ACTIONS = {
     "NOT_INITIALIZED": "运行 scripts/bootstrap.py 完成初始化",
     "PASSWORD_CHANGE_REQUIRED": "先完成强制改密",
     "SESSION_EXPIRED": "重新登录",
+    "TOKEN_INVALID": "令牌只在 Authorization 头里（查询串通道默认关闭），检查是否带了头、是否拼错",
     "TOKEN_REVOKED": "令牌已撤销，请管理员重新签发",
     "TOKEN_SCOPE_DENIED": "令牌作用域不足，请管理员扩大作用域",
     "QUOTA_EXCEEDED": "等待窗口重置或调整配额",
@@ -626,6 +788,10 @@ CODE_ACTIONS = {
     "UPSTREAM_RATE_LIMIT": "降低并发或稍后重试",
     "UPSTREAM_TIMEOUT": "查任务状态，勿重复提交",
     "TASK_STATUS_UNKNOWN": "调用对账接口，不要重投",
+    "IDEMPOTENCY_IN_PROGRESS": "同键请求正在处理中：等它结束，用**同一个** Idempotency-Key 重试",
+    "MAINTENANCE": "平台正在恢复备份（写操作暂停）：退避重试，读接口可用",
+    "LEASE_LOST": "任务租约被其他 worker 接手：无需处理，稍后查任务状态",
+    # MIGRATION_NOT_ADOPTED 是启动期常量，只会出现在日志与退出码里（不会作为 HTTP 错误码返回）
 }
 
 def explain(err: dict) -> str:

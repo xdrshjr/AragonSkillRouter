@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
 
-from ...crypto.keyring import rotation_status, rotate_master_key
+from ...crypto.keyring import rotate_master_key, rotation_status
 from ...deps import page_params, require_password_changed
 from ...errors import ApiError, Code
 from ...schemas.engine import SettingsUpdate
@@ -78,8 +80,12 @@ async def trigger_backup(ctx: SessionContext = Depends(require_password_changed)
     return {"queued": True, "queue_id": queue_id, "note": "备份在 worker 中执行，完成后写入 file_objects 可下载"}
 
 
-@router.get("/settings/backup/now")
+@router.post("/settings/backup/now")
 async def backup_now(ctx: SessionContext = Depends(require_password_changed)) -> dict:
+    """立即备份（F-14）：必须 POST + CSRF，旧 GET 已删除（框架对 GET 回 405）。
+
+    同步执行 `backup_job.build_backup(quick=False)`，返回产物名 + sha256 供运维核对。
+    """
     result = backup_job.build_backup(quick=False)
     audit.write(
         "backup.created",
@@ -88,9 +94,13 @@ async def backup_now(ctx: SessionContext = Depends(require_password_changed)) ->
         summary={"sha256": result["sha256"]},
         actor_id=ctx.admin_id,
     )
+    archive = Path(str(result["file"]))
     return {
+        "ok": True,
+        "product": archive.name,
         "file_id": result["file_id"],
         "sha256": result["sha256"],
+        "size": archive.stat().st_size if archive.exists() else None,
         "path": result["file"],
         "manifest": result["manifest"],
         "download_url": f"/api/admin/files/{result['file_id']}",

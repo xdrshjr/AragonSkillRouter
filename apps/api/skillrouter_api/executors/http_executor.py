@@ -1,4 +1,4 @@
-"""HTTP 执行核心：同步 / 流式 / 异步提交（§7.6）。"""
+"""HTTP 执行核心：同步 / 流式 / 异步提交（§7.6 / §A.3.5）。"""
 
 from __future__ import annotations
 
@@ -21,6 +21,15 @@ from .parsers import apply_response_map, extract_delta, load_json, parse_sse_lin
 log = get_logger("skillrouter.run")
 
 PREVIEW_LIMIT = 2048
+
+_DNS_MARKERS = (
+    "name or service not known",
+    "getaddrinfo",
+    "nodename nor servname",
+    "name resolution",
+    "temporary failure in name",
+    "no address associated",
+)
 
 
 def build_request(
@@ -61,6 +70,13 @@ def build_request(
         extra_headers = {str(k): str(v) for k, v in options["extra_headers"].items()}
         headers.update(extra_headers)
         injected_names |= set(extra_headers)
+
+    # 上游幂等透传（§A.3.5）：只有 route 声明了 `idempotency_header` 才把平台幂等键原样带给上游；
+    # 未声明时不透传（重试策略按保守处理，由 errors[]/retry 配置决定）。
+    idem_header = request_conf.get("idempotency_header") or route.get("idempotency_header")
+    idem_key = options.get("idempotency_key")
+    if idem_header and idem_key:
+        headers[str(idem_header)] = str(idem_key)
 
     query: dict[str, Any] = {}
     for item in request_conf.get("query") or []:
@@ -139,6 +155,84 @@ async def _send(
     return response, text, elapsed
 
 
+def transport_kind(exc: BaseException) -> str:
+    """把 httpx 传输异常细分成 §A.3.5 的 6 类 transport。"""
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "connect_timeout"
+    if isinstance(exc, httpx.PoolTimeout):
+        # 还没拿到连接（连池都没排到）→ 视为未建立连接，可重试
+        return "connect_timeout"
+    if isinstance(exc, httpx.TimeoutException):
+        # ReadTimeout / WriteTimeout：请求已发出但没拿到完整响应
+        return "read_timeout"
+    if isinstance(exc, httpx.ConnectError):
+        text = str(exc).lower()
+        if any(marker in text for marker in _DNS_MARKERS):
+            return "dns_error"
+        if "refused" in text:
+            return "connection_refused"
+        if "reset" in text or "aborted" in text:
+            return "connection_reset"
+        return "connection_refused"
+    text = str(exc).lower()
+    if "reset" in text or "aborted" in text or "disconnected" in text:
+        return "connection_reset"
+    return "upstream_hung"
+
+
+def _unknown_result(
+    *,
+    request_id: str,
+    req: dict,
+    route: dict,
+    mapped: dict,
+    message: str,
+    elapsed: int,
+    started: float,
+    attempts: int,
+) -> ExecResult:
+    """读超时/连接被重置：立即返回 `status_unknown` + `needs_reconcile`，**不重投、不 failover**。"""
+    error = {
+        "code": mapped["code"],
+        "message": message,
+        "hint": mapped["hint"],
+        "retryable": False,
+        "upstream_status": None,
+        "transport": mapped.get("transport"),
+        "status_unknown": True,
+        "needs_reconcile": True,
+    }
+    timings = {
+        "queue_ms": 0,
+        "upstream_ms": elapsed,
+        "total_ms": elapsed_ms(started),
+        "needs_reconcile": True,
+        "transport": mapped.get("transport"),
+        "attempt": attempts,
+    }
+    return ExecResult(
+        request_id=request_id,
+        status="status_unknown",
+        error=error,
+        provider_id=route.get("provider_id"),
+        timings=timings,
+        request_fingerprint=req["fingerprint"],
+        request_preview=redact(
+            json.dumps(
+                {
+                    "method": req["method"],
+                    "url": req["url"],
+                    "headers": req["safe_headers"],
+                    "params": req["params"],
+                },
+                ensure_ascii=False,
+            ),
+            max_len=PREVIEW_LIMIT,
+        ),
+        retries=attempts - 1,
+    )
+
+
 async def invoke_sync(
     *,
     request_id: str,
@@ -151,7 +245,12 @@ async def invoke_sync(
     options: dict | None = None,
     retry_conf: dict | None = None,
 ) -> ExecResult:
-    """同步调用：请求 → 状态/错误映射 → response_map → ExecResult。"""
+    """同步调用：请求 → 状态/错误映射 → response_map → ExecResult。
+
+    重试语义（§A.3.5）：只有 `retryable=True` 的失败才退避重投；
+    `read_timeout` / `upstream_hung` / 非幂等 `connection_reset` 一旦出现立即返回
+    `status_unknown`，绝不重投（同一请求可能已在对方执行）。
+    """
     req = build_request(
         capability=capability,
         route=route,
@@ -169,32 +268,66 @@ async def invoke_sync(
 
     while attempts < max_attempts:
         attempts += 1
+        attempt_started = time.perf_counter()
         try:
             response, text, elapsed = await _send(req, timeout_ms=timeout_ms)
-        except httpx.TimeoutException:
-            last_error = map_error(status=None, body=None, rules=route.get("errors"), transport_error="timeout")
-            if attempts >= max_attempts or not last_error["retryable"]:
+        except httpx.HTTPError as exc:
+            kind = transport_kind(exc)
+            mapped = map_error(
+                status=None,
+                body=None,
+                rules=route.get("errors"),
+                transport_error=kind,
+                method=req["method"],
+            )
+            message = redact(str(exc) or mapped["code"], max_len=300)
+            if mapped["status_unknown"]:
+                return _unknown_result(
+                    request_id=request_id,
+                    req=req,
+                    route=route,
+                    mapped=mapped,
+                    message=message,
+                    elapsed=elapsed_ms(attempt_started),
+                    started=started,
+                    attempts=attempts,
+                )
+            last_error = {
+                "code": mapped["code"],
+                "message": message,
+                "hint": mapped["hint"],
+                "retryable": bool(mapped["retryable"]),
+                "upstream_status": None,
+                "transport": mapped.get("transport"),
+            }
+            if not mapped["retryable"] or attempts >= max_attempts:
                 return ExecResult(
                     request_id=request_id,
-                    status="status_unknown" if (req["method"] != "GET") else "failed",
-                    error={
-                        "code": "UPSTREAM_TIMEOUT",
-                        "message": "上游超时，无法判定是否已受理",
-                        "hint": "先查询任务/上游状态，不要重复提交",
-                        "retryable": True,
-                        "upstream_status": None,
-                    },
+                    status="failed",
+                    error=last_error,
                     provider_id=route.get("provider_id"),
-                    timings={"queue_ms": 0, "upstream_ms": elapsed_ms(started), "total_ms": elapsed_ms(started)},
+                    timings={
+                        "queue_ms": 0,
+                        "upstream_ms": elapsed_ms(attempt_started),
+                        "total_ms": elapsed_ms(started),
+                        "transport": mapped.get("transport"),
+                        "attempts": attempts,
+                    },
                     request_fingerprint=req["fingerprint"],
-                    request_preview=redact(json.dumps({"method": req["method"], "url": req["url"], "headers": req["safe_headers"], "params": req["params"]}, ensure_ascii=False), max_len=PREVIEW_LIMIT),
+                    request_preview=redact(
+                        json.dumps(
+                            {
+                                "method": req["method"],
+                                "url": req["url"],
+                                "headers": req["safe_headers"],
+                                "params": req["params"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        max_len=PREVIEW_LIMIT,
+                    ),
                     retries=attempts - 1,
                 )
-        except httpx.HTTPError as exc:
-            last_error = map_error(status=None, body=None, rules=route.get("errors"), transport_error="connect")
-            last_error["message"] = redact(str(exc), max_len=300)
-            if attempts >= max_attempts:
-                break
         else:
             body = load_json(text)
             if 200 <= response.status_code < 300:
@@ -274,7 +407,7 @@ async def invoke_sync(
                     request_fingerprint=req["fingerprint"],
                     retries=attempts - 1,
                 )
-        # 退避后重试
+        # 退避后重试（只有 retryable 的传输/上游错误会走到这里）
         import asyncio
 
         await asyncio.sleep(min(base_ms * (2 ** (attempts - 1)), int(retry_conf.get("max_ms", 8000))) / 1000)
@@ -304,7 +437,8 @@ async def stream_events(
 ) -> AsyncIterator[dict]:
     """流式调用：产出 `{type: 'delta'|'usage'|'done'|'error', ...}`。
 
-    一旦产生首个 delta，绝不重试、绝不切换提供商（需求硬约束）。
+    一旦产生首个 delta，绝不重试、绝不切换提供商（需求硬约束）；
+    读超时按 §A.3.5 归为「结果不确定」：`retryable=False` + `needs_reconcile=True`。
     """
     req = build_request(
         capability=capability,
@@ -382,26 +516,29 @@ async def stream_events(
                     },
                     "produced": produced,
                 }
-        except httpx.TimeoutException:
-            yield {
-                "type": "error",
-                "error": {
-                    "code": "UPSTREAM_TIMEOUT",
-                    "message": "上游流式响应超时",
-                    "hint": "已产生的内容不可恢复，请重试",
-                    "retryable": True,
-                    "upstream_status": None,
-                },
-            }
         except httpx.HTTPError as exc:
+            kind = transport_kind(exc)
+            mapped = map_error(
+                status=None,
+                body=None,
+                rules=route.get("errors"),
+                transport_error=kind,
+                method=req["method"],
+            )
+            # 流式不重投：已经产出内容 / 请求已发出 → 结果不确定，交给对账
+            unresolved = bool(mapped.get("status_unknown")) or produced
             yield {
                 "type": "error",
+                "status_unknown": unresolved,
+                "needs_reconcile": unresolved,
                 "error": {
-                    "code": "UPSTREAM_UNAVAILABLE",
-                    "message": redact(str(exc), max_len=300),
-                    "hint": "检查网络与上游状态",
-                    "retryable": True,
+                    "code": mapped["code"],
+                    "message": redact(str(exc) or mapped["code"], max_len=300),
+                    "hint": mapped["hint"] if not produced else "已产生的内容不可恢复，请先对账再决定是否重试",
+                    "retryable": False,
                     "upstream_status": None,
+                    "transport": mapped.get("transport"),
+                    "status_unknown": unresolved,
                 },
             }
 
@@ -410,4 +547,4 @@ def elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
 
 
-__all__ = ["build_request", "invoke_sync", "stream_events", "elapsed_ms"]
+__all__ = ["build_request", "invoke_sync", "stream_events", "elapsed_ms", "transport_kind"]

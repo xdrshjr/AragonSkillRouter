@@ -8,9 +8,18 @@
  *   (spec §4.2: 32-byte random value carried in `X-Internal-Token`).
  * - The engine pin is validated as a semver-ish exact version, because the whole
  *   upgrade story (spec §12.4) depends on the pin being exact and rewritable.
+ * - **The pointer wins over the environment** (spec §A.3.7-4): `AGENT_ENGINE_RUNTIME_DIR/current.json`
+ *   is written by the Python platform on a successful switch, read here at boot, and echoed
+ *   as `pin_source: "pointer" | "env"`. A broken pointer falls back to `ENGINE_PIN` and is
+ *   *logged as an error* (`engine_pointer_invalid`) — never silently.
  * - No secret is ever read from the environment on behalf of upstream providers:
  *   provider keys arrive only through `platform-client.materialize()`.
  */
+
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+import { NULL_LOGGER, type Logger } from './types.js';
 
 export interface ModelConfig {
   /** Default provider id when a turn does not specify one. `''` = no default. */
@@ -39,6 +48,18 @@ export interface TimeoutConfig {
 
 export type EngineMode = 'host' | 'inline' | 'auto';
 
+/** Where the effective engine pin came from (spec §A.3.7-4). */
+export type PinSource = 'pointer' | 'env';
+
+/** Shape of `AGENT_ENGINE_RUNTIME_DIR/current.json`, written by the Python platform. */
+export interface EnginePointer {
+  version: string;
+  pin?: string;
+  schema_version?: number;
+  provenance?: string;
+  engine_home?: string;
+}
+
 export interface Config {
   nodeEnv: string;
   bind: string;
@@ -46,10 +67,23 @@ export interface Config {
   sharedSecret: string;
   internalUrl: string;
   policyPath: string;
+  /** Effective pin: the pointer's version when readable, else `ENGINE_PIN`. */
   enginePin: string;
+  /** `ENGINE_PIN` as configured, kept for diagnostics. */
+  enginePinEnv: string;
+  /** Which of the two produced `enginePin`. */
+  pinSource: PinSource;
+  /** Why the pointer was rejected (broken JSON / missing version dir); `undefined` = healthy. */
+  pointerError?: string;
+  /** Directory holding the platform-written pointer (`current.json`). */
+  engineRuntimeDir: string;
   engineMode: EngineMode;
   /** Root under which per-version engine homes live: `<root>/<version>/`. */
   engineHomeRoot: string;
+  /** Where isolated build artifacts are written (must be the shared `/data` volume). */
+  buildsDir: string;
+  /** Optional maintenance marker file; its existence is reported by `/healthz`. */
+  maintenanceFlagFile: string;
   model: ModelConfig;
   timeouts: TimeoutConfig;
   /** Directory for `turns.jsonl` session traces written by the gateway. */
@@ -112,8 +146,65 @@ const SEMVERISH = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
+/** Absolute or relative `<homeRoot>/<version>` for a pin. */
+export function engineHomePath(homeRoot: string, version: string): string {
+  const root = homeRoot.replace(/[\\/]+$/, '');
+  return `${root}/${version}`;
+}
+
+/** Result of looking for the platform-written pointer. */
+export interface PointerRead {
+  pointer: EnginePointer | null;
+  /** Human-readable reason the pointer was rejected (`null` when fine or absent). */
+  error: string | null;
+  path: string;
+}
+
+/**
+ * Read `AGENT_ENGINE_RUNTIME_DIR/current.json`.
+ *
+ * The pointer is only trusted when **both** the JSON and the referenced version
+ * directory exist: a pointer to a version that was never installed (or was garbage
+ * collected) would make the gateway report a pin it cannot possibly run.
+ */
+export function readEnginePointer(runtimeDir: string, homeRoot: string): PointerRead {
+  const path = join(runtimeDir, 'current.json');
+  if (!existsSync(path)) return { pointer: null, error: null, path };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { pointer: null, error: `current.json is not valid JSON: ${message}`, path };
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { pointer: null, error: 'current.json is not a JSON object', path };
+  }
+  const record = raw as Record<string, unknown>;
+  const version = record['version'];
+  if (typeof version !== 'string' || !SEMVERISH.test(version)) {
+    return { pointer: null, error: `current.json has no usable version (got ${JSON.stringify(version)})`, path };
+  }
+  const home = engineHomePath(homeRoot, version);
+  if (!existsSync(home)) {
+    return { pointer: null, error: `engine home for ${version} does not exist (${home})`, path };
+  }
+  const schemaVersion = record['schema_version'];
+  return {
+    pointer: {
+      version,
+      ...(typeof record['pin'] === 'string' ? { pin: record['pin'] } : {}),
+      ...(typeof schemaVersion === 'number' ? { schema_version: schemaVersion } : {}),
+      ...(typeof record['provenance'] === 'string' ? { provenance: record['provenance'] } : {}),
+      ...(typeof record['engine_home'] === 'string' ? { engine_home: record['engine_home'] } : {}),
+    },
+    error: null,
+    path,
+  };
+}
+
 /** Load and validate configuration. Throws `ConfigError` listing every problem. */
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, logger: Logger = NULL_LOGGER): Config {
   const problems: string[] = [];
 
   const bind = str(env, 'AGENT_GATEWAY_BIND', '127.0.0.1');
@@ -147,9 +238,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     problems.push(`SKILLROUTER_INTERNAL_URL is not a valid URL: ${JSON.stringify(internalUrl)}`);
   }
 
-  const enginePin = str(env, 'ENGINE_PIN', '0.2.34');
-  if (!SEMVERISH.test(enginePin)) {
-    problems.push(`ENGINE_PIN must be an exact version like 0.2.34 (got ${JSON.stringify(enginePin)})`);
+  const enginePinEnv = str(env, 'ENGINE_PIN', '0.2.34');
+  if (!SEMVERISH.test(enginePinEnv)) {
+    problems.push(`ENGINE_PIN must be an exact version like 0.2.34 (got ${JSON.stringify(enginePinEnv)})`);
+  }
+
+  // -- pointer overrides the env pin (spec §A.3.7-2 / R2-09) ------------------
+  const engineHomeRoot = str(env, 'AGENT_ENGINE_HOME_ROOT', 'var/aragon-home/engines');
+  const engineRuntimeDir = str(env, 'AGENT_ENGINE_RUNTIME_DIR', 'var/engine-runtime');
+  let enginePin = enginePinEnv;
+  let pinSource: PinSource = 'env';
+  let pointerError: string | undefined;
+  const pointer = readEnginePointer(engineRuntimeDir, engineHomeRoot);
+  if (pointer.error !== null) {
+    pointerError = pointer.error;
+    logger.error('engine_pointer_invalid', {
+      path: pointer.path,
+      error: pointer.error,
+      fallback_pin: enginePinEnv,
+    });
+  } else if (pointer.pointer !== null) {
+    enginePin = pointer.pointer.version;
+    pinSource = 'pointer';
   }
 
   const modeRaw = str(env, 'AGENT_GATEWAY_ENGINE_MODE', 'auto').toLowerCase();
@@ -205,8 +315,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     internalUrl: internalUrl.replace(/\/+$/, ''),
     policyPath: str(env, 'AGENT_POLICY_PATH', 'var/agent-policy.json'),
     enginePin,
+    enginePinEnv,
+    pinSource,
+    ...(pointerError === undefined ? {} : { pointerError }),
+    engineRuntimeDir,
     engineMode,
-    engineHomeRoot: str(env, 'AGENT_ENGINE_HOME_ROOT', 'var/aragon-home/engines'),
+    engineHomeRoot,
+    buildsDir: str(env, 'AGENT_ENGINE_BUILDS_DIR', join(dirname(engineRuntimeDir), 'engine-builds')),
+    maintenanceFlagFile: str(env, 'AGENT_MAINTENANCE_FLAG_FILE', ''),
     model: {
       providerId: str(env, 'AGENT_MODEL_PROVIDER', 'anthropic'),
       modelId: str(env, 'AGENT_MODEL_ID', ''),
@@ -224,6 +340,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
 /** Resolve the per-version engine home (`var/aragon-home/engines/<version>`). */
 export function engineHome(config: Config, version: string): string {
-  const root = config.engineHomeRoot.replace(/[\\/]+$/, '');
-  return `${root}/${version}`;
+  return engineHomePath(config.engineHomeRoot, version);
+}
+
+/** The installed package directory a pin actually resolves to (spec §A.5.3 `resolved_path`). */
+export function engineResolvedPath(config: Config, version: string): string {
+  return `${engineHome(config, version).replace(/[\\/]+$/, '')}/node_modules/@aragon-agent/core`;
+}
+
+/** `<homeRoot>/<version>/node_modules` — what the engine child must resolve from. */
+export function engineNodeModules(config: Config, version: string): string {
+  return `${engineHome(config, version).replace(/[\\/]+$/, '')}/node_modules`;
+}
+
+/** `true` when the platform wrote the maintenance marker (reported by `/healthz`). */
+export function maintenanceEnabled(config: Config): boolean {
+  return config.maintenanceFlagFile !== '' && existsSync(config.maintenanceFlagFile);
 }

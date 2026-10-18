@@ -10,6 +10,7 @@ import {
   ClipboardList,
   Cpu,
   KeyRound,
+  KeySquare,
   LayoutDashboard,
   ListChecks,
   LogOut,
@@ -27,13 +28,12 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import * as React from 'react';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import { cn } from '@/components/ui/cn';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useToast } from '@/components/ui/toast';
 import { logout } from '@/lib/auth';
-import { MAINTENANCE_EVENT, OFFLINE_EVENT, isApiError } from '@/lib/api';
+import { MAINTENANCE_EVENT, OFFLINE_EVENT, fetchHealthz, isApiError } from '@/lib/api';
 import type { EngineState, MeResponse } from '@/lib/types';
 
 export interface NavCounts {
@@ -60,6 +60,13 @@ const NAV_ITEMS: NavItem[] = [
     label: '提供商',
     icon: <Plug {...ICON} />,
     match: (p) => p.startsWith('/providers'),
+  },
+  {
+    // 顶层扁平列表，紧跟「提供商」（spec §A.3.11：本轮不引入导航分组）
+    href: '/credentials',
+    label: '凭证',
+    icon: <KeySquare {...ICON} />,
+    match: (p) => p === '/credentials' || p.startsWith('/credentials/'),
   },
   {
     href: '/capabilities',
@@ -105,6 +112,7 @@ const NAV_ITEMS: NavItem[] = [
 const SEARCH_TARGETS: { href: string; label: string; keywords: string }[] = [
   { href: '/', label: '概览', keywords: 'overview 首页 指标' },
   { href: '/providers', label: '提供商', keywords: 'provider 凭证 credential' },
+  { href: '/credentials', label: '凭证列表', keywords: 'credential 凭证 过期 expiring 指纹' },
   { href: '/capabilities', label: '能力列表', keywords: 'capability 能力' },
   { href: '/capabilities/new', label: '新建能力', keywords: 'new capability 向导 openapi' },
   { href: '/skills', label: 'SKILL 列表', keywords: 'skill 技能' },
@@ -189,6 +197,28 @@ export function AppShell({
       window.removeEventListener(MAINTENANCE_EVENT, onMaintenance);
       window.removeEventListener('offline', onNativeOffline);
       window.removeEventListener('online', onNativeOnline);
+    };
+  }, []);
+
+  /**
+   * 维护横幅读 `/healthz.maintenance`（spec §A.3.13），而不是只靠「撞到一次 503」。
+   * 首帧立刻拉一次，之后每 30s 轮询；`maintenance: false` 时横幅自动消失。
+   * 503 事件（MAINTENANCE_EVENT）仍然立即点亮横幅：轮询有间隔，写操作失败更早可见。
+   */
+  React.useEffect(() => {
+    const controller = new AbortController();
+    let stopped = false;
+    const poll = async (): Promise<void> => {
+      const health = await fetchHealthz(controller.signal);
+      if (stopped || !health) return;
+      setMaintenance(health.maintenance);
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 30_000);
+    return () => {
+      stopped = true;
+      controller.abort();
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -484,10 +514,8 @@ export function AppShell({
             role="alert"
             className="flex items-center gap-2 border-b border-border bg-[var(--sr-danger-weak)] px-4 py-2 text-13 text-content"
           >
-            平台处于维护模式（503）。已保存的数据不会丢失，稍后自动恢复。
-            <Button variant="link" size="sm" onClick={() => setMaintenance(false)}>
-              知道了
-            </Button>
+            <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-danger" />
+            维护中：正在恢复备份，请稍候（写操作已暂停）
           </div>
         ) : null}
         {narrow ? (

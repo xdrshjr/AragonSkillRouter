@@ -84,6 +84,22 @@ def build_backup(*, quick: bool = False) -> dict:
     return {"file": str(archive), "manifest": manifest, "file_id": saved["file_id"], "sha256": manifest["sha256"]}
 
 
+def quick_backup(*, label: str = "pre-upgrade") -> dict:
+    """升级/回滚前的快速备份（只导 DB，不带 files/）。
+
+    返回 `{file_id, sha256, file, label, created_at}`；失败直接抛异常，
+    由调用方（`upgrade/switch.py`）转成「不切换」——**先备份后切换**是硬顺序。
+    """
+    result = build_backup(quick=True)
+    return {
+        "file_id": result.get("file_id"),
+        "sha256": result.get("sha256"),
+        "file": result.get("file"),
+        "label": label,
+        "created_at": (result.get("manifest") or {}).get("created_at"),
+    }
+
+
 def _migration_revision() -> str | None:
     try:
         connection = sqlite3.connect(str(settings.db_file))

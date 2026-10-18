@@ -16,6 +16,57 @@
 | 备份目标 | 异地存储（对象存储/另一台机器）与保留策略 | 每日备份、保留 14 份（§14.3） |
 | 时钟 | NTP 同步 | 会话过期、幂等、签名 URL 都依赖时间 |
 
+## 0. 容器内跑一次性命令：只能用这两种写法（§A.3.12 / F-22）
+
+api 镜像的 `ENTRYPOINT` 是 `/app/deploy/entrypoint.api.sh`，**第一个参数就是角色名**。
+所以 `docker compose run --rm api python …` 会把 `python` 当角色名，直接
+`[FATAL] UNKNOWN_ROLE 用法：entrypoint.api.sh api|worker|run`。正确写法（二选一，等价）：
+
+```bash
+# 写法 A（最短）：绕过入口脚本，直接跑 python。注意 cwd 是镜像的 WORKDIR=/app
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm \
+  --entrypoint python api scripts/bootstrap.py
+
+# 写法 B（推荐，保留入口脚本的目录/环境处理）：显式给 run 角色，剩余参数原样 exec
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm \
+  --entrypoint /app/deploy/entrypoint.api.sh api run python scripts/bootstrap.py
+
+# 写法 C（等价于 B）：用环境变量指定角色；此时**所有位置参数都是命令**，不会被当角色名
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm \
+  -e SKILLROUTER_ROLE=run --entrypoint /app/deploy/entrypoint.api.sh api \
+  python scripts/bootstrap.py
+```
+
+角色解析优先级（`deploy/entrypoint.api.sh` 顶部，实现细节，排查时会用到）：
+
+| 输入 | 解析结果 | 位置参数怎么算 |
+|---|---|---|
+| `SKILLROUTER_ROLE=<角色>` 已设置 | **环境变量优先** | 全部都是命令/参数（不 shift） |
+| 只有首个位置参数 | `$1` 即角色 | 其余是命令/参数（shift 掉角色） |
+| 两者都没有 | 默认 `api` | — |
+
+`run` 角色**不做**启动前备份、**不跑**迁移，只 `exec` 后面的命令（避免「查一次库顺手又迁移一遍」）。
+看日志/查库用 `exec`（在**已在运行**的容器里执行，不经过 ENTRYPOINT，写法不变）：
+
+```bash
+docker compose -f deploy/docker-compose.yml exec api python -c "print('ok')"
+```
+
+## 0.1 `python scripts/bootstrap.py` 是初始化单轨入口
+
+「迁移 + 种子 + 首次管理员初始化 + 清理过期会话 + ensure_dirs + 启动摘要」全部由它一个入口完成
+（`services/bootstrap.py`）。**不要**再手工 `alembic upgrade head` 拼流程，也不要写只跑一半的脚本：
+
+| 你想做 | 用什么 | 不要用什么 |
+|---|---|---|
+| 首次初始化 / 每次启动的迁移 | `python scripts/bootstrap.py` | 手写 `alembic upgrade head`（会漏种子与 `schema_version`） |
+| 存量库（无 `alembic_version`）接入版本管理 | `bootstrap.py` 内部会先算指纹再 `stamp`；诊断用 `python scripts/adopt_alembic.py --dry-run` | 直接 `alembic stamp head`（会把历史迁移跳过） |
+| 重置管理员密码 | `python scripts/bootstrap.py reset-admin-password --user admin` | 直接改 `admin_users` 表 |
+
+之所以「单轨」：迁移在入口脚本里只允许调 `bootstrap.py`（`do_migrate()` 的第一分支），
+避免「A 脚本跑了迁移、B 脚本没跑种子」导致的状态漂移。`entrypoint.api.sh` 里退回
+`alembic upgrade head` 的分支只在 `scripts/bootstrap.py` **整个缺失**时才走，并会打 `[WARN]`。
+
 ## 1. 生成三个密钥（一次，妥善保存）
 
 ```bash
@@ -126,8 +177,9 @@ docker compose -f deploy/docker-compose.yml exec api python -c \
 # 1) 停掉 api（避免并发写）
 docker compose -f deploy/docker-compose.yml stop api worker
 # 2) 交互式重置（脚本属后端交付物：scripts/bootstrap.py）
-docker compose -f deploy/docker-compose.yml run --rm --no-deps api \
-  python scripts/bootstrap.py reset-admin-password --user admin
+#    注意：必须走 --entrypoint python（或 `run` 角色），否则会被当成角色名而 UNKNOWN_ROLE
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm --no-deps \
+  --entrypoint python api scripts/bootstrap.py reset-admin-password --user admin
 # 3) 起服务 → 用新密码登录 → 立刻改密
 docker compose -f deploy/docker-compose.yml start api worker
 ```
@@ -194,6 +246,7 @@ docker compose -f deploy/docker-compose.yml up -d     # 启动前自动 quick �
 | api 容器反复重启，日志 `[FATAL] STARTUP_BACKUP_FAILED` | 磁盘满 / 卷不可写 | 查 `df -h`、卷权限（uid 1000）；临时 `SKILLROUTER_SKIP_STARTUP_BACKUP=1` |
 | `[FATAL] BOOTSTRAP_MISSING` | `scripts/bootstrap.py` 不在镜像里 | 确认 `deploy/Dockerfile.api` 的 `COPY scripts/` 与代码版本一致 |
 | `[FATAL] DATA_DIR_NOT_WRITABLE` | 卷属主与容器 uid（1000）不一致 | `chown -R 1000:1000` 卷目录 |
+| `[FATAL] UNKNOWN_ROLE 用法：entrypoint.api.sh api\|worker\|run` | 用了 `docker compose run --rm api python …`，`python` 被当成角色名 | 改 `--entrypoint python` 或 `--entrypoint /app/deploy/entrypoint.api.sh … run python …`（见 §0） |
 | `502` 且 api healthy | nginx 与 api 网络不一致 | 两服务都需在 `frontend` 网络（见 compose） |
 | `409 NOT_INITIALIZED` | 初始化闸门生效但未初始化 | 跑 `bootstrap.py`；不要期待匿名初始化接口（不提供） |
 | 页面能打开但接口全 403 | 还在「必须改密」状态 | 先完成改密 |

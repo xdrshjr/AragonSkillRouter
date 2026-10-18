@@ -22,6 +22,13 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bsk-[A-Za-z0-9_\-]{6,}"), "sk-***"),
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}"), "Bearer ***"),
     (re.compile(r"(?i)basic\s+[A-Za-z0-9+/=]{8,}"), "Basic ***"),
+    # 查询串里的凭据/签名：`?token=`、`?sig=`、`?api_key=`…（§A.3.3）
+    # `exp` 故意不匹配：签名 URL 的过期时间是排障关键（「链接是否过期」），
+    # `sig` 已足以阻止重放。
+    (
+        re.compile(r"(?i)\b(token|access_token|sig|signature|api_key|key|secret)=([^&\s\"']+)"),
+        r"\1=***",
+    ),
     (re.compile(r"[A-Za-z0-9+/]{60,}={0,2}"), "<long-base64>"),
     (re.compile(r"\b1[3-9]\d{9}\b"), "1**********"),
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b"), "***@***"),

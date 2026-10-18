@@ -1,4 +1,9 @@
-"""出站/抓取安全：SSRF 防护（§11.1 / D16）。"""
+"""出站/抓取安全：SSRF 防护（§11.1 / D16 / §A.3.9）。
+
+白名单与附加黑名单**从设置表运行时读取**（`services/settings_runtime.py`，60s TTL）：
+设置页改完 `fetch_allowlist` / `ssrf_deny_extra` 后，同一进程的下一次请求即生效，
+不再需要重启；跨进程（worker）最长 60s。
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ import httpx
 
 from ..errors import ApiError, Code
 from ..logging import redact
+from ..services import settings_runtime
 from ..settings import settings
 
 ALLOWED_SCHEMES = {"http", "https"}
@@ -33,12 +39,25 @@ class FetchResult:
     truncated: bool
 
 
+def allowlist() -> list[str]:
+    """运行时白名单；DB/env 都为空时回落到部署配置（保持未配置时的既有行为）。"""
+    entries = settings_runtime.allowlist()
+    return entries or list(settings.allowlist)
+
+
+def deny_list() -> list[str]:
+    """黑名单 = 部署基线 `ssrf_deny` + 设置页追加的 `ssrf_deny_extra`。"""
+    baseline = list(settings.ssrf_deny_list)
+    extra = [item for item in settings_runtime.deny_extra() if item not in baseline]
+    return baseline + extra
+
+
 def _is_denied_ip(ip: str) -> bool:
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return True
-    for raw in settings.ssrf_deny_list:
+    for raw in deny_list():
         try:
             if "/" in raw and addr in ipaddress.ip_network(raw, strict=False):
                 return True
@@ -50,7 +69,7 @@ def _is_denied_ip(ip: str) -> bool:
 
 
 def _allowlisted(host: str) -> bool:
-    for entry in settings.allowlist:
+    for entry in allowlist():
         if entry == host:
             return True
         if entry.startswith("*.") and host.endswith(entry[1:]):

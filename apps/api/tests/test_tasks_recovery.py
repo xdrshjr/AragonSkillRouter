@@ -26,7 +26,7 @@ def test_lease_claim_and_renew() -> None:
     row_id = next(row.id for row in claimed if row.id == queue_id)
     assert leases.renew(row_id, "w-lease") is True
     assert leases.renew(row_id, "w-other") is False
-    leases.release(row_id, ok=True)
+    leases.release(row_id, worker_id="w-lease", ok=True)
     with db_write() as s:
         assert s.get(TaskQueue, row_id).status == "done"
 
@@ -51,7 +51,7 @@ def test_failed_handler_requeues_until_max_attempts(monkeypatch) -> None:
     for _ in range(2):
         claimed = leases.claim("w-retry", ["file_parse"])
         for row in claimed:
-            leases.release(row.id, ok=False, error="boom", retry_delay_s=120)
+            leases.release(row.id, worker_id="w-retry", ok=False, error="boom", retry_delay_s=120)
     with db_write() as s:
         rows = list(s.scalars(select(TaskQueue).where(TaskQueue.kind == "file_parse")))
     assert all(row.status in ("queued", "dead") for row in rows)
@@ -84,14 +84,23 @@ def test_cancel_local_only_when_upstream_unsupported(client, admin, make_capabil
         headers=token["headers"],
         json={"input": {"prompt": "cancel"}, "options": {"mode": "async"}},
     ).json()["task_id"]
+    # 新语义（§A.3.6-1）：`upstream_task_id` 为空时是「提交前取消」（202 pending_submit），
+    # 要走到 local_only 分支必须先模拟「已提交上游但上游不支持取消」。
+    with db_write() as s:
+        row = s.get(Task, task_id)
+        row.status = "running"
+        row.upstream_task_id = "up-local-1"
+        row.cancel_capability = "none"
     r = client.post(f"/api/v1/tasks/{task_id}/cancel", headers=token["headers"])
     assert r.status_code == 200
     body = r.json()
     assert body["cancel_scope"] == "local_only"
     assert "远端" in body["note"] or "上游任务可能仍在执行" in body["note"]
+    assert body["upstream_task_id"] == "up-local-1", "local_only 必须保留 upstream_task_id 供人工追踪"
     detail = client.get(f"/api/v1/tasks/{task_id}", headers=token["headers"]).json()
     assert detail["status"] == "canceled"
     assert "远端可能仍在执行" in detail["status_detail"]
+    assert detail["upstream_task_id"] == "up-local-1"
 
 
 def test_cancel_remote_when_supported(client, admin, make_capability, make_token, monkeypatch) -> None:

@@ -109,9 +109,16 @@ export interface Credential {
   kind: string;
   auth_type: string;
   header_name: string | null;
+  /** 服务端列 `secret_mask`（旧响应里的 `secret.masked` 不再读取） */
   secret_mask: string;
+  /** 明文 sha256 前 12 位；不做「前缀猜测」的替代品 */
   secret_fingerprint: string;
+  /** 只含白名单键（spec §A.3.2 `_PUBLIC_META_KEYS`）；敏感键永不出现在这里 */
   meta: JsonObject;
+  /** 被投影剔除的键名（含已密封进 `meta_sealed` 的键），前端只展示键名 */
+  meta_redacted_keys: string[];
+  /** 是否存在密封的敏感 meta（只输出布尔，不含内容） */
+  meta_sealed: boolean;
   status: CredentialStatus;
   expires_at: string | null;
   last_verified_at: string | null;
@@ -119,6 +126,8 @@ export interface Credential {
   rotation_of: string | null;
   created_at: string;
   updated_at: string;
+  /** 列表投影额外给出（`GET /credentials` 与 `/providers/{id}` 同一投影） */
+  provider_name?: string;
 }
 
 export interface CredentialVerification {
@@ -279,9 +288,19 @@ export interface Capability {
   created_at: string;
   updated_at: string;
   routes?: CapabilityRoute[];
-  success_rate_24h?: number | null;
+  /* ── 列表指标（§A.3.1-3）：无数据时是 `null`，不是 0 ── */
+  /** 最近一次测试是否成功（JSON boolean，不是 0/1）；`null` = 从未测试 */
   last_test_ok?: boolean | null;
+  /** 最近一次测试时间；`null` = 从未测试 */
   last_test_at?: string | null;
+  /** 近 24h 调用成功率；无调用时 `null`（**不是 0**） */
+  success_rate_24h?: number | null;
+  /** 近 24h 调用次数；无调用时 `0` */
+  call_count_24h?: number;
+  /** 详情接口返回的最近 10 条测试记录（按 at 倒序） */
+  test_runs?: CapabilityTestRun[];
+  route_count?: number;
+  enabled_route_count?: number;
   has_unpublished_changes?: boolean;
   issues?: CapabilityIssue[];
 }
@@ -299,38 +318,58 @@ export interface CapabilityValidation {
   issues: CapabilityIssue[];
 }
 
+/**
+ * `POST /api/admin/capabilities/{id}/test` 的返回体（spec §A.3.1，已冻结）。
+ * 没有 `ok` / `route` / `at`：通过判定唯一来源是 `status === 'succeeded'`，
+ * 时间与落库证据来自 `GET /capabilities/{id}` 的 `test_runs[]`。
+ */
+export type CapabilityTestStatus = 'succeeded' | 'failed' | 'status_unknown';
+
+export interface CapabilityTestUsedRoute {
+  route_id: string | null;
+  provider_id: string | null;
+  credential_id: string | null;
+}
+
+export interface CapabilityTestDroppedRoute {
+  route_id: string;
+  reason: string;
+}
+
 export interface CapabilityTestResult {
   test_run_id: string;
-  ok: boolean;
-  status: string;
+  status: CapabilityTestStatus;
   http_status: number | null;
   latency_ms: number | null;
   response_preview: string | null;
+  /** 解析后的输出（按 response_map 映射） */
+  output: Json | null;
   error: ApiErrorShape | null;
-  route: {
-    id: string;
-    provider_id?: string | null;
-    provider_name?: string | null;
-    credential_id?: string | null;
-  } | null;
-  at?: string | null;
+  used_route: CapabilityTestUsedRoute | null;
+  /** 未选中的候选 route 与被丢弃的原因 */
+  dropped: CapabilityTestDroppedRoute[];
 }
 
+/**
+ * `GET /capabilities/{id}` 的 `test_runs[]`（`get_capability()` 的投影，按 `at` 倒序，最多 10 条）。
+ * `ok` 是**布尔**（后端 `bool(t.ok)`）——比较时永远不要写 `=== 1`。
+ */
 export interface CapabilityTestRun {
   id: string;
-  capability_id: string;
-  capability_version_id: string | null;
-  route_id: string | null;
-  version: string | null;
-  mode: CallMode;
   ok: boolean;
+  mode: CallMode;
+  route_id: string | null;
   http_status: number | null;
   latency_ms: number | null;
-  request_preview_redacted: string | null;
-  response_preview_redacted: string | null;
   error_code: string | null;
-  error_detail_redacted: string | null;
   at: string;
+  /* 详情接口当前不返回以下字段（保留可选以便未来扩展，缺失时 UI 不展示） */
+  capability_id?: string;
+  capability_version_id?: string | null;
+  version?: string | null;
+  request_preview_redacted?: string | null;
+  response_preview_redacted?: string | null;
+  error_detail_redacted?: string | null;
 }
 
 export interface CapabilityVersion {
@@ -516,9 +555,13 @@ export interface CallLog {
   http_status: number | null;
   error_code: string | null;
   latency_ms: number | null;
+  /** 与 `latency_ms` 同值；`sort=duration_ms` 用的就是这个外部字段名 */
+  duration_ms?: number | null;
   queue_ms: number | null;
   upstream_ms: number | null;
   retries: number;
+  /** 结果不确定、需要人工对账（概览「待处理问题」会跳到这里筛选） */
+  needs_reconcile: boolean;
   payload_policy: string;
   request_preview: string | null;
   response_preview: string | null;
@@ -555,6 +598,13 @@ export type TaskStatus =
   | 'canceled'
   | 'status_unknown';
 
+/**
+ * 取消范围四值枚举（spec §A.5.1）：
+ * `none` 未请求 / `pending_submit` 提交中取消（已受理，等上游 id 后追取消）/
+ * `remote` 上游已受理 / `local_only` 上游不支持，仅停止本地等待。
+ */
+export type CancelScope = 'none' | 'pending_submit' | 'remote' | 'local_only';
+
 export interface OutputFile {
   file_id: string;
   mime: string;
@@ -577,6 +627,10 @@ export interface Task {
   error_code: string | null;
   error_detail_redacted: string | null;
   cancel_capability: 'none' | 'local_only' | 'remote';
+  /** 取消请求提交时间；非空说明「已请求取消」 */
+  cancel_requested_at: string | null;
+  /** 取消范围（终态判定与文案都读它，而不是猜 `status`） */
+  cancel_scope: CancelScope;
   result: JsonObject;
   output_files: OutputFile[];
   resume_policy: string;
@@ -586,9 +640,40 @@ export interface Task {
   finished_at: string | null;
 }
 
+/**
+ * `POST /tasks/{id}/cancel`：提交中取消回 **202 + `canceling`/`pending_submit`**，
+ * 上游已受理仍 200；`cancel_scope: 'none'` 表示任务已是终态（`ok: false`）。
+ */
 export interface CancelResult {
-  cancel_scope: 'remote' | 'local_only';
+  ok?: boolean;
   status: TaskStatus;
+  cancel_scope: CancelScope;
+  cancel_requested_at?: string | null;
+  note?: string | null;
+}
+
+/* ── 列表查询参数（§A.3.11 白名单） ───────────────────── */
+
+/** `GET /api/admin/tasks` 支持的查询参数 */
+export interface TaskListParams {
+  page?: number;
+  page_size?: number;
+  q?: string;
+  status?: TaskStatus | '';
+  capability_key?: string;
+  /** 白名单：`created_at` / `updated_at` / `status`（`-` 前缀降序） */
+  sort?: string;
+}
+
+/** `GET /api/admin/credentials` 支持的查询参数 */
+export interface CredentialListParams {
+  page?: number;
+  page_size?: number;
+  q?: string;
+  /** `active` / `disabled` / `expired` / `expiring`（≤7 天） */
+  status?: CredentialStatus | 'expiring' | '';
+  /** 白名单：`name` / `created_at` / `expires_at` / `last_verified_at` */
+  sort?: string;
 }
 
 /* ── Agent ────────────────────────────────────────────── */
@@ -767,6 +852,9 @@ export interface EngineCapabilityGroups {
   note: string;
 }
 
+/** 升级前置验证结论（spec §A.5.2 `verify_status`） */
+export type EngineVerifyStatus = 'passed' | 'blocked' | 'failed';
+
 export interface EngineStatus {
   /** 适配层从网关 /healthz 拿到的实时引擎信息 */
   engine: {
@@ -788,6 +876,28 @@ export interface EngineStatus {
   upgrade_in_progress: boolean;
   checks_allowed: boolean;
   last_checked_at: string | null;
+  /** pin 的来源：`pointer`（指针文件）/ `env`（环境变量） */
+  pin_source?: 'pointer' | 'env';
+  /** 升级前置验证结论；`blocked` 时禁止自动升级 */
+  verify_status?: EngineVerifyStatus;
+  /** 阻断原因（`verify_status === 'blocked'` 时非空） */
+  blocked_reasons?: string[];
+  /** 实际解析到的引擎安装路径 */
+  resolved_path?: string | null;
+}
+
+/** `GET /healthz`（spec §A.3.13：新增 `maintenance`） */
+export interface HealthStatus {
+  ok: boolean;
+  service?: string;
+  version?: string;
+  env?: string;
+  db?: { ok: boolean; schema_version: number; error: string | null };
+  initialized?: boolean;
+  engine_pin?: string;
+  /** 备份恢复进行中：写操作被 503 拦截 */
+  maintenance: boolean;
+  time?: string;
 }
 
 export interface EngineCandidate {
@@ -889,6 +999,34 @@ export interface BackupResult {
   sha256?: string;
   download_url?: string;
   created_at?: string | null;
+}
+
+/** `POST /api/admin/settings/backup/now`（同步执行，返回真实产物名 + sha256） */
+export interface BackupNowResult {
+  ok: boolean;
+  /** 归档文件名，例如 `skillrouter-backup-20261018T134155Z.tar.gz` */
+  product: string;
+  file_id: string;
+  sha256: string;
+  size: number | null;
+  path: string;
+  manifest: JsonObject;
+  download_url: string | null;
+  created_at?: string | null;
+}
+
+/** `POST /api/admin/settings`（PATCH 语义）保存后的生效范围 */
+export interface SettingsSaved {
+  saved_at?: string | null;
+  effective?: { api?: string; worker?: string };
+  readonly?: string[];
+}
+
+/** `POST /api/admin/engine/upgrade` 请求体（`acknowledge_blocked` 为 blocked 时必填） */
+export interface EngineUpgradeRequest {
+  version: string;
+  mode: 'verify_only' | 'deploy';
+  acknowledge_blocked?: boolean;
 }
 
 export interface RotateMasterKeyResult {

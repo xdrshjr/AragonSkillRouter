@@ -33,6 +33,9 @@ def _brief(row: EngineUpgradeRun) -> dict:
         "started_at": row.started_at,
         "finished_at": row.finished_at,
         "result": row.result,
+        # 候选结论与「运行怎么结束」是两列，不得互相顶替（§A.6.2 I5）
+        "verify_status": row.verify_status,
+        "blocked_reasons": list(row.blocked_reasons or []),
         "steps": row.steps or [],
         "error": row.error,
         "backup_file_id": row.backup_file_id,
@@ -122,3 +125,28 @@ def set_candidate_status(version: str, status: str, report: dict) -> None:
         if row:
             row.verification_status = status
             row.verification_report = report
+
+
+def set_verify_status(run_id: str, status: str, blocked_reasons: list[str] | None = None) -> None:
+    """写入候选结论（`passed | blocked | failed`）与阻断原因列表。
+
+    只写 `verify_status`/`blocked_reasons`，**不动** `result`
+    （`result` 由 `finish_run`/`switch` 按「这次运行怎么结束」写）。
+    """
+    with db_write() as s:
+        row = s.get(EngineUpgradeRun, run_id)
+        if row is None:
+            return
+        row.verify_status = status
+        row.blocked_reasons = list(blocked_reasons or [])
+
+
+def last_candidate_status(version: str) -> str | None:
+    """该版本候选行上一次的验证结论（`POST /engine/upgrade` 判断 `acknowledge_blocked`）。"""
+    with db_session() as s:
+        row = s.scalar(
+            select(EngineCandidate)
+            .where(EngineCandidate.version == version)
+            .order_by(EngineCandidate.detected_at.desc())
+        )
+    return row.verification_status if row else None

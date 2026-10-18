@@ -843,6 +843,7 @@
           "providers"
         ],
         "summary": "List Credentials",
+        "description": "分页 + `sort`（白名单）+ `status=expiring`（≤7 天）+ `q`（name/kind/provider_name）。\n\n字段投影由 `services/credentials.py` 单点负责（`secret_mask`/`secret_fingerprint`/…），\n这里只做查询参数、白名单校验与「服务层不支持的那两维」的本地筛选。",
         "operationId": "list_credentials_api_admin_credentials_get",
         "parameters": [
           {
@@ -3660,6 +3661,7 @@
           "calls"
         ],
         "summary": "List Calls",
+        "description": "`from`/`to` 是 `date_from`/`date_to` 的别名：命中时回 `X-Deprecated-Param` 提示迁移。",
         "operationId": "list_calls_api_admin_calls_get",
         "parameters": [
           {
@@ -3759,6 +3761,42 @@
             }
           },
           {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "deprecated：用 date_from",
+              "title": "From"
+            },
+            "description": "deprecated：用 date_from"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "deprecated：用 date_to",
+              "title": "To"
+            },
+            "description": "deprecated：用 date_to"
+          },
+          {
             "name": "min_latency",
             "in": "query",
             "required": false,
@@ -3772,6 +3810,22 @@
                 }
               ],
               "title": "Min Latency"
+            }
+          },
+          {
+            "name": "needs_reconcile",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Needs Reconcile"
             }
           }
         ],
@@ -3851,6 +3905,7 @@
           "tasks"
         ],
         "summary": "List Tasks",
+        "description": "`q` 覆盖 `request_id`/`capability_key`/`upstream_task_id`；`sort` 走白名单。",
         "operationId": "list_tasks_api_admin_tasks_get",
         "parameters": [
           {
@@ -3883,6 +3938,22 @@
                 }
               ],
               "title": "Capability"
+            }
+          },
+          {
+            "name": "capability_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Capability Key"
             }
           }
         ],
@@ -5467,12 +5538,13 @@
       }
     },
     "/api/admin/settings/backup/now": {
-      "get": {
+      "post": {
         "tags": [
           "settings"
         ],
         "summary": "Backup Now",
-        "operationId": "backup_now_api_admin_settings_backup_now_get",
+        "description": "立即备份（F-14）：必须 POST + CSRF，旧 GET 已删除（框架对 GET 回 405）。\n\n同步执行 `backup_job.build_backup(quick=False)`，返回产物名 + sha256 供运维核对。",
+        "operationId": "backup_now_api_admin_settings_backup_now_post",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -5481,7 +5553,7 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object",
-                  "title": "Response Backup Now Api Admin Settings Backup Now Get"
+                  "title": "Response Backup Now Api Admin Settings Backup Now Post"
                 }
               }
             }
@@ -5783,6 +5855,7 @@
           "v1-tasks"
         ],
         "summary": "Get Task",
+        "description": "详情带 `cancel_requested_at` / `cancel_scope`（`none/pending_submit/remote/local_only`）。",
         "operationId": "get_task_api_v1_tasks__task_id__get",
         "parameters": [
           {
@@ -5827,6 +5900,7 @@
           "v1-tasks"
         ],
         "summary": "Cancel Task",
+        "description": "提交中取消返回 **202**（已受理、等待上游），上游已受理时仍 200（§A.5.1）。",
         "operationId": "cancel_task_api_v1_tasks__task_id__cancel_post",
         "parameters": [
           {
@@ -5914,6 +5988,7 @@
           "v1-files"
         ],
         "summary": "Download",
+        "description": "签名 URL 优先，其次平台令牌（§A.3.10 / §A.5.1）。\n\n顺序固定：`sig+exp` 有效即放行（**免令牌**）；否则要求令牌且作用域含\n`files:read`；两者都没有 → `401 UNAUTHENTICATED`。此前无效签名返回 `404`，\n会被误读成「文件不存在」，本轮统一为 401 + 区分 hint。",
         "operationId": "download_api_v1_files__file_id__get",
         "parameters": [
           {
@@ -8294,6 +8369,11 @@
             "type": "string",
             "title": "Mode",
             "default": "verify_only"
+          },
+          "acknowledge_blocked": {
+            "type": "boolean",
+            "title": "Acknowledge Blocked",
+            "default": false
           }
         },
         "type": "object",

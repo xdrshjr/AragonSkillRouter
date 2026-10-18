@@ -1,4 +1,4 @@
-"""设置读写（含 engine_policy / payload_policy / 白名单 / Agent 模型配置，§9.2）。"""
+"""设置读写（含 engine_policy / payload_policy / 白名单 / Agent 模型配置，§9.2 / §A.3.9）。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from ..errors import ApiError, Code
 from ..logging import get_logger, redact
 from ..models import Setting
 from ..settings import settings
+from . import settings_runtime
 
 log = get_logger("skillrouter.run")
 
@@ -25,6 +26,17 @@ EDITABLE = {
     "agent_model",
 }
 
+#: 部署事实：可以读，但**永不从 DB 覆盖**，因此列在 `POST /settings` 的 `readonly` 里
+READONLY_KEYS = (
+    "master_key_path",
+    "agent_gateway_secret",
+    "db_path",
+    "data_dir",
+    "agent_engine_home_root",
+    "engine_toolchain",
+    "cancel_reconcile_minutes",
+)
+
 
 def get_all() -> dict:
     with db_session() as s:
@@ -36,6 +48,10 @@ def get_all() -> dict:
     out.setdefault("fetch_allowlist", settings.allowlist)
     out.setdefault("default_budget_usd", settings.default_budget_usd)
     out.setdefault("ssrf_deny", settings.ssrf_deny_list)
+    # `fetch_allowlist` 在 DB 里可能以逗号分隔字符串存在（历史行 + PATCH 的 `",".join`），
+    # 前端类型是 `string[]`：不归一会让设置页 `.join()` 抛错整页白屏（§A.3.9）
+    out["fetch_allowlist"] = _as_list(out.get("fetch_allowlist"))
+    out["ssrf_deny"] = _as_list(out.get("ssrf_deny"))
     out["env"] = settings.env
     out["install_mode"] = settings.install_mode
     out["install_command"] = settings.install_command()
@@ -44,6 +60,15 @@ def get_all() -> dict:
     out["egress_policy"] = settings.egress_policy
     out["retention_days_max"] = 3650
     return redact(out)
+
+
+def _as_list(value) -> list[str]:  # noqa: ANN001
+    """把 DB/环境里「字符串或列表」的取值统一成 `list[str]`（GET /settings 的契约）。"""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [x.strip() for x in value.split(",") if x.strip()]
+    return [str(x).strip() for x in value if str(x).strip()]
 
 
 def get_value(key: str, default=None):  # noqa: ANN001
@@ -80,7 +105,13 @@ def update(patch: dict, *, actor: str | None = None) -> dict:
                 row.updated_by = actor
                 row.updated_at = now_iso()
     write_agent_policy()
-    return get_all()
+    # 同进程立即生效（跨进程最长 TTL_SECONDS 秒，§A.3.9）
+    settings_runtime.invalidate()
+    result = get_all()
+    result["saved_at"] = now_iso()
+    result["effective"] = settings_runtime.effective_scopes()
+    result["readonly"] = list(READONLY_KEYS)
+    return result
 
 
 def agent_config() -> dict:
@@ -108,6 +139,7 @@ def update_agent_config(patch: dict, *, actor: str | None = None) -> dict:
             row.updated_by = actor
             row.updated_at = now_iso()
     write_agent_policy()
+    settings_runtime.invalidate()
     return redact(current)
 
 

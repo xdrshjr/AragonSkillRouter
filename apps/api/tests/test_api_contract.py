@@ -101,6 +101,7 @@ ADMIN_ENDPOINTS = [
     "/api/admin/settings/rotate-master-key",
     "/api/admin/settings/audit",
     "/api/admin/settings/backup",
+    "/api/admin/settings/backup/now",
 ]
 
 
@@ -182,3 +183,275 @@ def test_pagination_shape(client, admin) -> None:
     body = r.json()
     assert set(body) == {"items", "page", "page_size", "total"}
     assert body["page"] == 1 and body["page_size"] == 5
+
+
+# ── §A.3.11 列表契约（T-28 / T-29 / T-30）与 §A.6.2 I7（T-43） ──────────
+
+
+def _iso(delta_seconds: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _seed_calls(marker: str, count: int = 3) -> list[dict]:
+    """直接落 3 条调用记录（避免依赖执行器耗时），字段可预测地不同。"""
+    import os
+
+    from skillrouter_api.db import db_write
+    from skillrouter_api.models import CallLog
+
+    rows = []
+    for index in range(count):
+        request_id = f"req_{marker}_{index}_{os.urandom(3).hex()}"
+        caller_id = f"caller-{marker}"
+        rows.append(
+            {
+                "request_id": request_id,
+                "caller_id": caller_id,
+                "capability_key": f"cap.{marker}",
+                "latency_ms": (index + 1) * 100,
+                "created_at": _iso(-index * 60),
+            }
+        )
+    with db_write() as s:
+        for row in rows:
+            s.add(
+                CallLog(
+                    id=f"cal_{row['request_id']}",
+                    request_id=row["request_id"],
+                    caller_type="admin",
+                    caller_id=row["caller_id"],
+                    capability_key=row["capability_key"],
+                    mode="sync",
+                    status="success",
+                    latency_ms=row["latency_ms"],
+                    created_at=row["created_at"],
+                )
+            )
+    return rows
+
+
+def test_calls_needs_reconcile_filter(client, admin) -> None:
+    """I6：`call_logs.needs_reconcile=1` 的行必须能被 `/calls?needs_reconcile=1` 找出来。"""
+    import os
+
+    from sqlalchemy import select
+
+    from skillrouter_api.db import db_write
+    from skillrouter_api.models import CallLog
+
+    marker = os.urandom(3).hex()
+    rows = _seed_calls(marker)
+    with db_write() as s:
+        target = s.scalar(
+            select(CallLog).where(CallLog.request_id == rows[1]["request_id"])
+        )
+        target.needs_reconcile = 1
+        target.status = "status_unknown"
+
+    r = client.get(
+        "/api/admin/calls",
+        headers=admin["headers"],
+        params={"needs_reconcile": 1, "capability": f"cap.{marker}"},
+    )
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [i["request_id"] for i in items] == [rows[1]["request_id"]]
+    assert items[0]["needs_reconcile"] is True
+
+
+def test_calls_filter_aliases(client, admin) -> None:
+    """T-28：`from`/`to` 与 `date_from`/`date_to` 结果一致，且返回 `X-Deprecated-Param`。"""
+    import os
+
+    marker = os.urandom(3).hex()
+    _seed_calls(marker)
+    window = {"date_from": _iso(-3600), "date_to": _iso(60)}
+
+    canonical = client.get(
+        "/api/admin/calls",
+        headers=admin["headers"],
+        params={**window, "capability": f"cap.{marker}"},
+    )
+    assert canonical.status_code == 200
+    assert "X-Deprecated-Param" not in canonical.headers
+
+    aliased = client.get(
+        "/api/admin/calls",
+        headers=admin["headers"],
+        params={
+            "from": window["date_from"],
+            "to": window["date_to"],
+            "capability": f"cap.{marker}",
+        },
+    )
+    assert aliased.status_code == 200
+    assert aliased.headers["X-Deprecated-Param"] == "from,to"
+    assert [i["request_id"] for i in aliased.json()["items"]] == [
+        i["request_id"] for i in canonical.json()["items"]
+    ]
+
+
+def test_calls_sort_whitelist(client, admin) -> None:
+    """T-29：`-duration_ms` 生效；非法字段 400。"""
+    import os
+
+    marker = os.urandom(3).hex()
+    _seed_calls(marker)
+
+    r = client.get(
+        "/api/admin/calls",
+        headers=admin["headers"],
+        params={"sort": "-duration_ms", "capability": f"cap.{marker}"},
+    )
+    assert r.status_code == 200, r.text
+    durations = [i["duration_ms"] for i in r.json()["items"]]
+    assert durations == [300, 200, 100], durations
+
+    ascending = client.get(
+        "/api/admin/calls",
+        headers=admin["headers"],
+        params={"sort": "duration_ms", "capability": f"cap.{marker}"},
+    )
+    assert [i["duration_ms"] for i in ascending.json()["items"]] == [100, 200, 300]
+
+    bad = client.get(
+        "/api/admin/calls", headers=admin["headers"], params={"sort": "-cost_usd"}
+    )
+    assert bad.status_code == 400, bad.text
+    assert bad.json()["error"]["code"] == "VALIDATION_FAILED"
+
+
+def _seed_tasks(marker: str) -> dict:
+    """落 3 条任务行（不建队列项，避免干扰其它用例的 worker 排空）。"""
+    import os
+
+    from skillrouter_api.db import db_write
+    from skillrouter_api.models import Task
+
+    created = {}
+    with db_write() as s:
+        for index, status in enumerate(("queued", "running", "queued")):
+            task_id = f"tsk_{marker}_{index}_{os.urandom(3).hex()}"
+            s.add(
+                Task(
+                    id=task_id,
+                    request_id=f"req_{marker}_{index}",
+                    capability_key=f"cap.{marker}",
+                    mode="async",
+                    status=status,
+                    progress_percent=0,
+                    progress_stage="queued",
+                    input_snapshot={"input": {}},
+                    upstream_task_id=f"up-{marker}" if index == 1 else None,
+                    cancel_capability="remote" if index == 1 else "none",
+                    attempts=1,
+                    max_attempts=3,
+                    resume_policy="check",
+                    created_at=_iso(-index * 60),
+                    updated_at=_iso(-index * 60),
+                )
+            )
+            created[index] = task_id
+    return created
+
+
+def test_tasks_list_filters(client, admin) -> None:
+    """T-30：`q` / `status` / `capability_key` / 分页各一条断言。"""
+    import os
+
+    marker = os.urandom(3).hex()
+    tasks = _seed_tasks(marker)
+
+    by_capability = client.get(
+        "/api/admin/tasks", headers=admin["headers"], params={"capability_key": f"cap.{marker}"}
+    )
+    assert by_capability.status_code == 200, by_capability.text
+    assert by_capability.json()["total"] == 3
+
+    by_status = client.get(
+        "/api/admin/tasks",
+        headers=admin["headers"],
+        params={"capability_key": f"cap.{marker}", "status": "running"},
+    )
+    assert by_status.json()["total"] == 1
+    assert by_status.json()["items"][0]["task_id"] == tasks[1]
+
+    by_q_request = client.get(
+        "/api/admin/tasks", headers=admin["headers"], params={"q": f"req_{marker}_2"}
+    )
+    assert [i["task_id"] for i in by_q_request.json()["items"]] == [tasks[2]]
+
+    by_q_upstream = client.get("/api/admin/tasks", headers=admin["headers"], params={"q": f"up-{marker}"})
+    assert [i["task_id"] for i in by_q_upstream.json()["items"]] == [tasks[1]]
+
+    paged = client.get(
+        "/api/admin/tasks",
+        headers=admin["headers"],
+        params={"capability_key": f"cap.{marker}", "page": 1, "page_size": 2, "sort": "created_at"},
+    )
+    body = paged.json()
+    assert body["total"] == 3 and len(body["items"]) == 2
+    assert body["page"] == 1 and body["page_size"] == 2
+
+    bad = client.get("/api/admin/tasks", headers=admin["headers"], params={"sort": "mode"})
+    assert bad.status_code == 400, bad.text
+    assert bad.json()["error"]["code"] == "VALIDATION_FAILED"
+
+    # 收尾：种子改用终态，避免后续用例的 recover_on_startup 把它们当「未完成任务」补队列入队
+    from skillrouter_api.db import db_write
+    from skillrouter_api.models import Task
+
+    with db_write() as s:
+        for task_id in tasks.values():
+            row = s.get(Task, task_id)
+            if row.status in ("queued", "running"):
+                row.status = "canceled"
+
+
+def test_call_log_status_mapping(client, admin, make_capability, make_token, monkeypatch) -> None:
+    """T-43：`LOGGED_STATUS` 覆盖执行器三种状态；落库与成功率聚合用同一常量。"""
+    from skillrouter_api.services import execution
+
+    mapping = execution.LOGGED_STATUS
+    assert {"succeeded", "failed", "status_unknown"} <= set(mapping)
+    assert mapping["succeeded"] == "success", "成功率聚合的分子固定是 success"
+
+    from tests.fixtures.fake_upstream import FakeUpstream, patch_httpx
+
+    patch_httpx(monkeypatch, FakeUpstream())
+    cap = make_capability()
+    client.post(
+        f"/api/admin/capabilities/{cap['id']}/test",
+        headers=admin["headers"],
+        json={"input": {"prompt": "x"}},
+    )
+    client.post(
+        f"/api/admin/capabilities/{cap['id']}/publish",
+        headers=admin["headers"],
+        json={"version": "1.0.0"},
+    )
+    token = make_token()
+    r = client.post(
+        f"/api/v1/capabilities/{cap['key']}/invoke",
+        headers=token["headers"],
+        json={"input": {"prompt": "统计口径"}},
+    )
+    assert r.status_code == 200, r.text
+    request_id = r.json()["request_id"]
+
+    from skillrouter_api.db import db_session
+    from skillrouter_api.models import CallLog
+    from sqlalchemy import select
+
+    with db_session() as s:
+        row = s.scalar(select(CallLog).where(CallLog.request_id == request_id))
+    assert row is not None
+    assert row.status == mapping["succeeded"], row.status
+
+    overview = client.get("/api/admin/overview", headers=admin["headers"]).json()
+    assert overview["success_rate_24h"] is not None
+    assert overview["success_rate_24h"] > 0

@@ -18,8 +18,8 @@
  */
 
 import { dirname, join } from 'node:path';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import type { Config } from './config.js';
 import { engineHome } from './config.js';
@@ -106,17 +106,49 @@ export type CoreLoadResult =
 let coreLoadPromise: Promise<CoreLoadResult> | null = null;
 
 /**
+ * `true`-ish path of the engine entry installed under a per-version home.
+ *
+ * This is the explicit `require.resolve` fallback of spec §A.3.7-4: the SDK's `exports`
+ * map has only `types` + `import` conditions (no `require`), so `createRequire()` cannot
+ * resolve it — the ESM entry file is addressed directly instead.
+ */
+export function coreEntryFromHome(homeDir: string): string | null {
+  const entry = join(homeDir, 'node_modules', '@aragon-agent', 'core', 'dist', 'index.js');
+  return existsSync(entry) ? entry : null;
+}
+
+/** Version declared by the engine installed under `homeDir` (`null` = not installed). */
+export function readVersionFromHome(homeDir: string): string | null {
+  const pkgPath = join(homeDir, 'node_modules', '@aragon-agent', 'core', 'package.json');
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Load the engine SDK once per process.
+ *
+ * `homeDir` makes the child load the engine **installed under that version's home**
+ * (`<home>/node_modules/@aragon-agent/core`) instead of whatever the gateway image
+ * happens to ship — that is what makes a hot switch actually change the running code.
  *
  * The failure branch is deliberately explicit: a gateway without the engine is a
  * gateway that answers `/healthz` with `ok:false` and refuses turns with
  * `ENGINE_UNAVAILABLE`. That is the honest report required by spec §12.2.
  */
-export function loadCore(pin?: string): Promise<CoreLoadResult> {
+export function loadCore(pin?: string, homeDir?: string): Promise<CoreLoadResult> {
   if (coreLoadPromise) return coreLoadPromise;
   coreLoadPromise = (async (): Promise<CoreLoadResult> => {
     try {
-      const module = (await import('@aragon-agent/core')) as unknown as CoreModule;
+      const explicitEntry = homeDir === undefined ? null : coreEntryFromHome(homeDir);
+      const module = (
+        explicitEntry === null
+          ? await import('@aragon-agent/core')
+          : await import(pathToFileURL(explicitEntry).href)
+      ) as unknown as CoreModule;
       if (typeof module.AragonAgent !== 'function') {
         return { ok: false, error: `${ENGINE_PACKAGE} does not export AragonAgent; adapter contract broken` };
       }
@@ -127,7 +159,8 @@ export function loadCore(pin?: string): Promise<CoreLoadResult> {
         return { ok: false, error: `${ENGINE_PACKAGE} does not export defineTool; adapter contract broken` };
       }
       if (pin !== undefined) {
-        const installed = readInstalledVersion();
+        const installed =
+          homeDir === undefined ? readInstalledVersion() : (readVersionFromHome(homeDir) ?? readInstalledVersion());
         if (installed !== null && installed !== pin) {
           return {
             ok: false,
@@ -263,6 +296,8 @@ export interface EngineRuntimeOptions {
   logger?: Logger;
   /** Injection seam for tests: bypass the real SDK. */
   coreOverride?: CoreModule;
+  /** Per-version engine home to load from (`<root>/<version>`); unset = gateway's own dependency. */
+  engineHome?: string;
 }
 
 export class EngineRuntime {
@@ -275,6 +310,8 @@ export class EngineRuntime {
   private readonly turns = new Map<string, TurnState>();
   private readonly apiKeys = new Map<string, { secret: string; expiresAt: number; providerId: string }>();
   private core: CoreModule | null;
+  /** Per-version home this runtime was told to load from (child mode). */
+  private readonly engineHomeDir: string | null;
   private providerRegistry: unknown = null;
   private availability: EngineAvailability = 'starting';
   private detail: string | null = null;
@@ -287,6 +324,7 @@ export class EngineRuntime {
     this.streams = new StreamRegistry(options.config.timeouts.sseKeepAlive);
     this.policy = options.policy ?? loadPolicy(options.config.policyPath);
     this.core = options.coreOverride ?? null;
+    this.engineHomeDir = options.engineHome ?? null;
     if (options.coreOverride) {
       this.availability = 'available';
     }
@@ -300,7 +338,7 @@ export class EngineRuntime {
       this.availability = 'available';
       return;
     }
-    const loaded = await loadCore(this.config.enginePin);
+    const loaded = await loadCore(this.config.enginePin, this.engineHomeDir ?? undefined);
     if (!loaded.ok) {
       this.availability = 'unavailable';
       this.detail = loaded.error;
@@ -318,7 +356,11 @@ export class EngineRuntime {
   identity(): EngineIdentity {
     return {
       package: ENGINE_PACKAGE,
-      version: this.core ? readInstalledVersion() ?? this.config.enginePin : this.config.enginePin,
+      version: this.core
+        ? ((this.engineHomeDir === null ? null : readVersionFromHome(this.engineHomeDir)) ??
+          readInstalledVersion() ??
+          this.config.enginePin)
+        : this.config.enginePin,
       commit: process.env['ENGINE_COMMIT'] ?? null,
       schema_version: ENGINE_SCHEMA_VERSION,
     };
@@ -758,7 +800,7 @@ export class EngineRuntime {
    * this process and `import()` caches it. Reporting `ok:true` here would be the lie
    * spec §7.12-6 forbids, so a version change is rejected with the reason.
    */
-  async reload(targetVersion: string): Promise<ReloadResult> {
+  async reload(targetVersion: string, engineHome?: string): Promise<ReloadResult> {
     const current = this.identity().version;
     if (targetVersion === current) {
       return { ok: true, engine_version: current, stage: 'done', detail: 'target version already active' };
@@ -1053,7 +1095,7 @@ export interface EngineBackend {
   interrupt(turnId: string, reason?: string): Promise<StopReport>;
   steer(turnId: string, message: string): Promise<{ accepted: boolean; reason?: string }>;
   waitForIdle(turnId?: string): Promise<void>;
-  reload(targetVersion: string): Promise<ReloadResult>;
+  reload(targetVersion: string, engineHome?: string): Promise<ReloadResult>;
   shutdown(): Promise<void>;
   /** Set when the manager degraded (e.g. host mode failed and inline took over). */
   readonly degradedNote?: string;
@@ -1182,8 +1224,8 @@ export class EngineManager implements EngineBackend {
     return this.active.waitForIdle(turnId);
   }
 
-  reload(targetVersion: string): Promise<ReloadResult> {
-    return this.active.reload(targetVersion);
+  reload(targetVersion: string, engineHome?: string): Promise<ReloadResult> {
+    return this.active.reload(targetVersion, engineHome);
   }
 
   async shutdown(): Promise<void> {
@@ -1359,3 +1401,28 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 export function platformEventTypes(): readonly string[] {
   return PLATFORM_EVENT_TYPES;
 }
+
+/**
+ * The authoritative event-mapping contract (spec §A.3.7-1, "事件映射契约").
+ *
+ * These are the **upstream** event names `onUpstreamEvent()` maps onto the platform
+ * events. A candidate engine that stops emitting one of them would silently degrade the
+ * corresponding platform event into `engine.notice`, which is exactly the fidelity loss
+ * the upgrade gate must catch. This list is derived from `@aragon-agent/core`'s
+ * `AgentEvent` union (measured, `dist/types.d.ts`) — never from a hand-written count.
+ */
+export const ALL_EVENT_NAMES: readonly string[] = [
+  'agent_start',
+  'turn_start',
+  'message_update',
+  'tool_execution_start',
+  'tool_execution_end',
+  'turn_end',
+  'agent_end',
+  'steering_accepted',
+  'compaction_start',
+  'compaction_end',
+  'code_execution_start',
+  'code_execution_end',
+];
+

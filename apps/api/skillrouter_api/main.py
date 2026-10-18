@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 
@@ -9,11 +10,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from . import ADAPTER_VERSION, __version__
 from .db import db_session, schema_version
 from .db.seed import get_state
-from .errors import install_error_handlers
+from .deps import maintenance_block
+from .errors import error_response, install_error_handlers
 from .logging import get_logger, set_request_id, setup_logging
 from .settings import settings
 
@@ -27,24 +30,105 @@ SECURITY_HEADERS = {
 }
 
 
+def _log_request(
+    request: Request,
+    *,
+    rid: str,
+    latency: int,
+    event: str = "request",
+    level: int = logging.INFO,
+    code: str | None = None,
+    exc_info: bool = False,
+) -> None:
+    """统一的请求日志：**只记 `url.path`**（§A.3.3）。
+
+    查询串里可能带 `?token=` 或签名 URL 的 `sig`，一旦进日志就等于把凭据写进
+    磁盘；这里连 `str(request.url)` 都不拼，避免未来有人顺手加回来。
+    401/403 与 5xx 也一律走本函数，保证「错误日志」与「访问日志」是同一套字段。
+    """
+    extra: dict[str, object] = {"rid": rid, "path": request.url.path, "latency_ms": latency}
+    if code is not None:
+        extra["code"] = code
+    log.log(level, event, extra=extra, exc_info=exc_info)
+
+
+def _finalize(response: Response, rid: str) -> Response:
+    response.headers["X-Request-Id"] = rid
+    for key, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    return response
+
+
+def _mcp_maintenance_response(blocked) -> JSONResponse:  # noqa: ANN001
+    """MCP 通道的维护模式错误体（JSON-RPC `-32000`，§A.5.1）。"""
+    return JSONResponse(
+        status_code=blocked.status,
+        content={
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32000,
+                "message": blocked.message,
+                "data": {"code": blocked.code, "hint": blocked.hint, "retryable": True},
+            },
+        },
+    )
+
+
 class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):  # noqa: ANN001, ANN201
         rid = request.headers.get("X-Request-Id") or uuid.uuid4().hex[:16]
         request.state.request_id = rid
         set_request_id(rid)
         started = time.perf_counter()
+        blocked = maintenance_block(request)
+        if blocked is not None:
+            _log_request(
+                request,
+                rid=rid,
+                latency=int((time.perf_counter() - started) * 1000),
+                event="maintenance_blocked",
+                level=logging.WARNING,
+            )
+            if request.url.path.endswith("/mcp"):
+                return _finalize(_mcp_maintenance_response(blocked), rid)
+            return _finalize(error_response(blocked, rid), rid)
         try:
             response = await call_next(request)
         except Exception:
             latency = int((time.perf_counter() - started) * 1000)
-            log.exception("request_failed", extra={"rid": rid, "path": request.url.path, "latency_ms": latency})
+            _log_request(
+                request,
+                rid=rid,
+                latency=latency,
+                event="request_failed",
+                level=logging.ERROR,
+                exc_info=True,
+            )
             raise
         latency = int((time.perf_counter() - started) * 1000)
-        response.headers["X-Request-Id"] = rid
-        for key, value in SECURITY_HEADERS.items():
-            response.headers.setdefault(key, value)
-        if latency > 500 and request.url.path.startswith("/api/admin"):
-            log.info("slow_request", extra={"rid": rid, "path": request.url.path, "latency_ms": latency})
+        _finalize(response, rid)
+        status = response.status_code
+        if status >= 500:
+            _log_request(
+                request,
+                rid=rid,
+                latency=latency,
+                event="request_error",
+                level=logging.ERROR,
+                code=str(status),
+            )
+        elif status in (401, 403):
+            _log_request(
+                request,
+                rid=rid,
+                latency=latency,
+                event="request_rejected",
+                level=logging.WARNING,
+                code=str(status),
+            )
+        elif latency > 500 and request.url.path.startswith("/api/admin"):
+            _log_request(request, rid=rid, latency=latency, event="slow_request")
         return response
 
 
@@ -99,6 +183,8 @@ def create_app() -> FastAPI:
             version = schema_version()
         except Exception:  # noqa: BLE001
             version = -1
+        from .services.maintenance import is_maintenance
+
         return {
             "ok": db_ok,
             "service": "skillrouter-api",
@@ -108,6 +194,7 @@ def create_app() -> FastAPI:
             "db": {"ok": db_ok, "schema_version": version, "error": error},
             "initialized": initialized,
             "engine_pin": settings.engine_pin,
+            "maintenance": is_maintenance(),
             "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 

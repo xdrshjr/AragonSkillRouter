@@ -25,6 +25,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { delimiter } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -154,7 +155,7 @@ async function runChild(argv: string[]): Promise<void> {
     timeoutMs: config.platformTimeout,
   });
 
-  const runtime = new EngineRuntime({ config, platform, logger });
+  const runtime = new EngineRuntime({ config, platform, logger, ...(args.home === '' ? {} : { engineHome: args.home }) });
   await runtime.start();
   const status = runtime.status();
   if (status.availability !== 'available') {
@@ -410,7 +411,7 @@ export class HostSupervisor {
    * Four-step hot reload (spec §7.12-6). Every failure path keeps the OLD child
    * serving and leaves the pin untouched.
    */
-  async reload(targetVersion: string): Promise<ReloadResult> {
+  async reload(targetVersion: string, engineHomeOverride?: string): Promise<ReloadResult> {
     const current = this.identity().version;
     if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(targetVersion)) {
       return { ok: false, engine_version: current, stage: 'rejected', detail: `invalid target_version ${JSON.stringify(targetVersion)}` };
@@ -427,7 +428,7 @@ export class HostSupervisor {
     try {
       // ① start a child on the target pin
       try {
-        fresh = await this.spawnChild(targetVersion);
+        fresh = await this.spawnChild(targetVersion, engineHomeOverride);
       } catch (err) {
         return {
           ok: false,
@@ -512,15 +513,23 @@ export class HostSupervisor {
 
   // -- child plumbing -------------------------------------------------------
 
-  private async spawnChild(pin: string): Promise<ChildHandle> {
-    const home = engineHome(this.config, pin);
+  private async spawnChild(pin: string, homeOverride?: string): Promise<ChildHandle> {
+    const home = homeOverride ?? engineHome(this.config, pin);
     const { execArgs, cwd } = hostCommand(pin, home);
+    // `<home>/node_modules` goes into the resolution path so the child loads the engine
+    // *installed for this version*, not the one baked into the gateway image (§A.3.7-4).
+    // NODE_PATH is only honoured by the CJS resolver, hence the explicit entry file
+    // resolve inside `loadCore(pin, home)`; both are set so either path works.
+    const nodeModules = `${home.replace(/[\\/]+$/, '')}/node_modules`;
+    const inheritedPath = process.env['NODE_PATH'] ?? '';
     const child = spawn(process.execPath, execArgs, {
       cwd,
       env: {
         ...process.env,
         ENGINE_PIN: pin,
         ARAGON_HOME: home,
+        AGENT_ENGINE_HOME: home,
+        NODE_PATH: inheritedPath === '' ? nodeModules : `${nodeModules}${delimiter}${inheritedPath}`,
         NODE_ENV: process.env['NODE_ENV'] ?? 'production',
       },
       stdio: ['pipe', 'pipe', 'pipe'],

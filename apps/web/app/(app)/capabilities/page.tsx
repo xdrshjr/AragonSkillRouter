@@ -10,7 +10,7 @@ import { StatusBadge } from '@/components/common/StatusBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { apiGet } from '@/lib/api';
-import { formatPercent, formatRelative } from '@/lib/format';
+import { formatCount, formatPercent, formatRelative } from '@/lib/format';
 import { queryKeys } from '@/lib/query';
 import type { Capability, Paginated } from '@/lib/types';
 
@@ -108,17 +108,42 @@ export default function CapabilitiesPage() {
       ),
     },
     {
+      // 新增「上次测试」列（spec §A.3.1）：`last_test_ok` 为 null 表示从未测试
+      id: 'last_test',
+      header: '上次测试',
+      cell: (row) => {
+        const ok = row.last_test_ok ?? null;
+        if (ok === null) return <span className="text-13 text-content-muted">—</span>;
+        return (
+          <span className="flex flex-wrap items-center gap-1 text-13">
+            <Badge tone={ok ? 'ok' : 'danger'} dot>
+              {ok ? '通过' : '未通过'}
+            </Badge>
+            <span className="text-12 text-content-muted">
+              {row.last_test_at ? formatRelative(row.last_test_at) : '—'}
+            </span>
+          </span>
+        );
+      },
+    },
+    {
       id: 'success_rate_24h',
       header: '24h 成功率',
       align: 'right',
-      cell: (row) =>
-        row.success_rate_24h === undefined || row.success_rate_24h === null ? (
-          <span className="text-13 text-content-muted">—</span>
-        ) : (
-          <span className={row.success_rate_24h < 0.95 ? 'text-13 text-warn' : 'text-13 text-content'}>
-            {formatPercent(row.success_rate_24h)}
+      cell: (row) => {
+        // 无调用时后端给 null（不是 0）：显示「—」，绝不显示 0%
+        const rate = row.success_rate_24h;
+        const calls = row.call_count_24h ?? 0;
+        if (rate === null || rate === undefined) {
+          return <span className="text-13 text-content-muted">—</span>;
+        }
+        return (
+          <span className="flex flex-col items-end">
+            <span className={rate < 0.95 ? 'text-13 text-warn' : 'text-13 text-content'}>{formatPercent(rate)}</span>
+            <span className="text-12 text-content-muted">{formatCount(calls)} 次</span>
           </span>
-        ),
+        );
+      },
     },
     {
       id: 'updated_at',

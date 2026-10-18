@@ -7,7 +7,10 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select, update
 
 from ..db import db_write, now_iso
+from ..logging import get_logger
 from ..models import TaskQueue
+
+log = get_logger("skillrouter.run")
 
 LEASE_SECONDS = 60
 
@@ -72,11 +75,34 @@ def renew(queue_id: str, worker_id: str) -> bool:
         return True
 
 
-def release(queue_id: str, *, ok: bool, error: str | None = None, retry_delay_s: int = 0) -> None:
+def release(
+    queue_id: str,
+    *,
+    worker_id: str,
+    ok: bool,
+    error: str | None = None,
+    retry_delay_s: int = 0,
+) -> bool:
+    """释放租约并返回「是否真的由本 worker 释放」。
+
+    `worker_id` 必填：租约可能已被 reap 后他人重新领取，无条件写入会把新 owner 的
+    在途执行踩掉（F-08）。这里用「owner 条件更新」——owner 不匹配就不写库。
+    """
     with db_write() as s:
         row = s.get(TaskQueue, queue_id)
-        if row is None:
-            return
+        if row is None or row.status != "leased" or row.lease_owner != worker_id:
+            log.warning(
+                "lease_release_rejected",
+                extra={
+                    "object": queue_id,
+                    "detail": {
+                        "worker_id": worker_id,
+                        "status": getattr(row, "status", None),
+                        "owner": getattr(row, "lease_owner", None),
+                    },
+                },
+            )
+            return False
         if ok:
             row.status = "done"
             row.lease_owner = None
@@ -92,6 +118,7 @@ def release(queue_id: str, *, ok: bool, error: str | None = None, retry_delay_s:
                 row.lease_owner = None
                 row.lease_expires_at = None
                 row.available_at = _iso(retry_delay_s or 5)
+        return True
 
 
 def reap() -> int:

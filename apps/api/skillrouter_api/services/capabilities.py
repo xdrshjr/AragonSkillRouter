@@ -9,13 +9,15 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import jsonschema
-from sqlalchemy import desc, select
+from sqlalchemy import and_, case, desc, func, select
+from sqlalchemy.orm import aliased
 
 from ..db import db_session, db_write, now_iso, uuid_pk
 from ..errors import ApiError, Code
 from ..executors.http_executor import invoke_sync
 from ..logging import get_logger, redact
 from ..models import (
+    CallLog,
     Capability,
     CapabilityRoute,
     CapabilityTestRun,
@@ -504,12 +506,111 @@ def validate_definition(
 # ── CRUD ─────────────────────────────────────────────────────
 
 
-def _brief(row: Capability, definition: dict) -> dict:
+# ── 列表指标（4 个，批量聚合，禁止 N+1）─────────────────────────
+
+
+def _route_unit_price(selection) -> float | None:  # noqa: ANN001
+    """route 显式单价（定价阶梯第一级，§A.3.4-3）；没有则交给价目表/默认价。"""
+    chosen = getattr(selection, "chosen", None) or {}
+    raw = (chosen.get("price") or {}).get("unit_price_usd")
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _metrics_for(caps: list[tuple[str, str]]) -> dict[str, dict]:
+    """一次 `GROUP BY` + 一次窗口查询，批量算 4 个指标（§A.3.1-3）。
+
+    `caps` 是 `[(capability_key, capability_id)]`，返回 `{capability_key: {...}}`：
+    `last_test_ok` / `last_test_at` / `success_rate_24h`（无调用时 **None，不是 0**）/ `call_count_24h`。
+    """
+    # 成功率分子必须来自唯一映射常量（不变式 I7）：字面写 'succeeded' 会让成功恒为 0
+    from .execution import LOGGED_STATUS  # noqa: PLC0415 - execution 依赖本模块，只能延迟导入
+
+    ok_status = LOGGED_STATUS["succeeded"]
+    keys = [key for key, _cid in caps if key]
+    ids = [cid for _key, cid in caps if cid]
+    metrics: dict[str, dict] = {
+        key: {
+            "last_test_ok": None,
+            "last_test_at": None,
+            "success_rate_24h": None,
+            "call_count_24h": 0,
+        }
+        for key in keys
+    }
+    if not keys:
+        return metrics
+    since = (
+        (datetime.now(timezone.utc) - timedelta(hours=24))
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    with db_session() as s:
+        rows = s.execute(
+            select(
+                CallLog.capability_key,
+                func.count(),
+                func.sum(case((CallLog.status == ok_status, 1), else_=0)),
+            )
+            .where(
+                CallLog.created_at >= since,
+                CallLog.capability_key.in_(keys),
+                # 分母只算终态：异步调用的记录在提交时以 `queued` 落库，
+                # 把它算进分母会让成功率永远偏低（§A.3.1-2 / I7）
+                CallLog.status.in_(tuple(LOGGED_STATUS.values())),
+            )
+            .group_by(CallLog.capability_key)
+        ).all()
+        for key, total, ok in rows:
+            total = int(total or 0)
+            entry = metrics.setdefault(key, {})
+            entry["call_count_24h"] = total
+            entry["success_rate_24h"] = round(float(ok or 0) / total, 4) if total else None
+        if ids:
+            aliased_run = aliased(CapabilityTestRun)
+            latest = (
+                select(
+                    aliased_run.capability_id.label("capability_id"),
+                    func.max(aliased_run.at).label("max_at"),
+                )
+                .where(aliased_run.capability_id.in_(ids))
+                .group_by(aliased_run.capability_id)
+                .subquery()
+            )
+            test_rows = s.execute(
+                select(
+                    CapabilityTestRun.capability_id,
+                    CapabilityTestRun.ok,
+                    CapabilityTestRun.at,
+                ).join(
+                    latest,
+                    and_(
+                        CapabilityTestRun.capability_id == latest.c.capability_id,
+                        CapabilityTestRun.at == latest.c.max_at,
+                    ),
+                )
+            ).all()
+            by_id = {cid: key for key, cid in caps if cid}
+            for capability_id, ok, at in test_rows:
+                key = by_id.get(capability_id)
+                if key is None:
+                    continue
+                entry = metrics.setdefault(key, {})
+                entry["last_test_ok"] = bool(ok)
+                entry["last_test_at"] = at
+    return metrics
+
+
+def _brief(row: Capability, definition: dict, metrics: dict | None = None) -> dict:
     routes = definition.get("routes") or []
     primary = None
     candidates = [r for r in routes if r.get("enabled", True)]
     if candidates:
         primary = sorted(candidates, key=lambda r: int(r.get("priority", 0)))[0]
+    metrics = metrics or {}
     return {
         "id": row.id,
         "key": row.key,
@@ -526,6 +627,11 @@ def _brief(row: Capability, definition: dict) -> dict:
         "tags": row.tags or [],
         "route_count": len(routes),
         "enabled_route_count": len(candidates),
+        # 4 个列表指标：全部为「无数据 → null / 0」，不是占位 0 成功率
+        "last_test_ok": metrics.get("last_test_ok"),
+        "last_test_at": metrics.get("last_test_at"),
+        "success_rate_24h": metrics.get("success_rate_24h"),
+        "call_count_24h": int(metrics.get("call_count_24h") or 0),
         "primary_route": (
             {
                 "route_id": primary.get("id"),
@@ -555,7 +661,11 @@ def list_capabilities(
 ) -> dict:
     with db_session() as s:
         rows = list(s.scalars(select(Capability).where(Capability.deleted_at.is_(None))))
+        refs = [(row.key, row.id) for row in rows]
         items = [_brief(row, row.draft_definition or {}) for row in rows]
+    metrics = _metrics_for(refs)
+    for item in items:
+        item.update(metrics.get(item["key"]) or {})
     if provider:
         with db_session() as s:
             route_rows = list(s.scalars(select(CapabilityRoute).where(CapabilityRoute.provider_id == provider)))
@@ -580,7 +690,7 @@ def get_capability(capability_id: str) -> dict:
         if row is None or row.deleted_at:
             raise ApiError(Code.NOT_FOUND, "能力不存在")
         definition = _definition_of(row)
-        data = _brief(row, definition)
+        data = _brief(row, definition, _metrics_for([(row.key, row.id)]).get(row.key))
         data["definition"] = definition
         data["issues"] = validate_definition(definition, capability_id=row.id)
         data["credential_status"] = routing.credential_status_map(definition)
@@ -797,12 +907,17 @@ async def test_capability(capability_id: str, payload: dict, *, actor: str | Non
             row.status = "testing"
             row.updated_at = now_iso()
         test_run_id = run.id
-    usage.record(
+    # 测试面板同样是「真实触达上游」的调用，必须计费（token/agent 作用域为空，§A.3.4）
+    usage.account(
         call_id=None,
         provider_id=(selection.chosen or {}).get("provider_id"),
         capability_key=data["key"],
         token_id=None,
-        usage=result.usage,
+        agent_id=None,
+        unit=(result.usage or {}).get("unit") or "tokens",
+        qty=(result.usage or {}).get("total") or (result.usage or {}).get("qty") or 0,
+        source=(result.usage or {}).get("source") or "estimated",
+        unit_price_usd=_route_unit_price(selection),
     )
     return {
         "test_run_id": test_run_id,

@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     engine_channel: str = "stable"
     engine_pin: str = "0.2.34@0a119a64890717b0e3017edbaaf00944babf19a8"
     engine_check_interval_hours: int = 24
+    #: 已安装引擎根目录（与网关 `AGENT_ENGINE_HOME_ROOT` 必须同值，§A.3.7-2）
+    agent_engine_home_root: str = ""
+    #: 构建/验证工具链归属：`gateway`（生产，默认）/ `local`（仅 development）
+    engine_toolchain: str = "gateway"
+    #: 「取消中」悬挂行的自动收口阈值（分钟，§A.3.6 重启恢复）
+    cancel_reconcile_minutes: int = 30
 
     # 出站 / 抓取
     fetch_allowlist: str = ""
@@ -71,6 +77,8 @@ class Settings(BaseSettings):
     payload_policy: str = "redacted_preview"
     default_budget_usd: float = 0.0
     worker_concurrency: int = 4
+    #: 平台令牌是否允许放进查询串（`?token=`）；默认关闭，`[compat]` 逃生阀（§A.3.3）
+    allow_query_token: bool = False
 
     # CLI / 安装
     install_mode: str = "tarball"  # tarball | npm
@@ -163,6 +171,13 @@ class Settings(BaseSettings):
         return self.data_path / "engine-runtime"
 
     @property
+    def engine_home_root(self) -> Path:
+        """已安装引擎根目录；`SKILLROUTER_ENGINE_HOME_ROOT` 为空时取 `<data>/aragon-home/engines`。"""
+        if self.agent_engine_home_root.strip():
+            return Path(self.agent_engine_home_root.strip()).resolve()
+        return (self.aragon_home / "engines").resolve()
+
+    @property
     def downloads_dir(self) -> Path:
         return self.data_path / "downloads"
 
@@ -210,6 +225,7 @@ class Settings(BaseSettings):
             self.builds_dir,
             self.aragon_home,
             self.engine_runtime_dir,
+            self.engine_home_root,
             self.downloads_dir,
             self.backup_dir,
             self.db_file.parent,

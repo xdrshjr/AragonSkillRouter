@@ -63,6 +63,12 @@ export interface EngineHealth {
   tools: string[];
   active_turns: number;
   uptime_s: number;
+  /** Where the effective pin came from (`pointer` = `current.json`, `env` = `ENGINE_PIN`). */
+  pin_source?: 'pointer' | 'env';
+  /** `<AGENT_ENGINE_HOME_ROOT>/<version>/node_modules/@aragon-agent/core` — "installed but inert" probe. */
+  resolved_path?: string;
+  /** True when the platform's maintenance marker exists (write freeze). */
+  maintenance?: boolean;
 }
 
 /** A single message in a replayed conversation (upstream `Message` shape). */
@@ -146,12 +152,78 @@ export interface TurnAccepted {
   turn_id: string;
 }
 
-/** `POST /internal/admin/reload` response (spec §7.12-6, §12.4-4). */
+/** `POST /internal/admin/reload` response (spec §7.12-6, §12.4-4, §A.5.3). */
 export interface ReloadResult {
   ok: boolean;
   engine_version: string;
   stage: 'start_child' | 'wait_ready' | 'drain_old' | 'close_old' | 'done' | 'rejected';
   detail: string;
+  /** Which pointer the new child is running from (`pointer` when `engine_home` was supplied). */
+  pin_source?: 'pointer' | 'env';
+  /** Version that was serving before this call. */
+  previous_version?: string;
+  /** Engine home the child was told to resolve from, when the caller supplied one. */
+  engine_home?: string;
+}
+
+/** `POST /internal/admin/reload` request body (spec §A.5.3). */
+export interface ReloadRequest {
+  /** New contract field. */
+  version?: string;
+  /** Legacy field name kept for a same-version rollover (§A.5.3 R2-10). */
+  target_version?: string;
+  /** Absolute path under `/data`: `<AGENT_ENGINE_HOME_ROOT>/<version>`. */
+  engine_home?: string;
+}
+
+/** One step of an in-gateway build (clone / npm ci / build / prune). */
+export interface BuildStep {
+  name: string;
+  code: number;
+  detail: string;
+}
+
+/** `POST /internal/admin/build` response (spec §A.5.3). */
+export interface BuildResult {
+  ok: boolean;
+  /** `built` = artifact ready, `failed` = the candidate does not build, `blocked` = toolchain missing. */
+  status: 'built' | 'failed' | 'blocked';
+  stage: string;
+  detail: string;
+  artifact_dir?: string;
+  manifest?: Record<string, unknown>;
+  steps: BuildStep[];
+}
+
+/** `POST /internal/admin/build` request body. */
+export interface BuildRequest {
+  version: string;
+  provenance?: string;
+  commit_sha?: string | null;
+}
+
+/** One node-side artifact check (export symbols / event names). */
+export interface VerifyCheck {
+  check: string;
+  status: 'passed' | 'failed' | 'blocked';
+  detail: string;
+}
+
+/** `POST /internal/admin/verify-artifact` response (spec §A.5.3). */
+export interface VerifyResult {
+  status: 'passed' | 'failed' | 'blocked';
+  checks: VerifyCheck[];
+  detail?: string;
+  /** Symbols the artifact actually exports (diagnostics). */
+  symbols?: string[];
+  /** Event names the artifact declares (diagnostics). */
+  event_names?: string[];
+}
+
+/** `POST /internal/admin/verify-artifact` request body. */
+export interface VerifyRequest {
+  artifact_dir: string;
+  expected_symbols?: string[];
 }
 
 /** NDJSON frames exchanged with `engine-host` (spec §7.12-6). */

@@ -3,37 +3,80 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CircleAlert, RefreshCw, XCircle } from 'lucide-react';
 import * as React from 'react';
-import { EmptyState, RequestIdCopy } from '@/components/common/EmptyState';
+import { DataTable, type DataTableColumn, type FilterChipGroup } from '@/components/common/DataTable';
+import { RequestIdCopy } from '@/components/common/EmptyState';
 import { PageHeader } from '@/components/common/PageHeader';
 import { StatusBadge } from '@/components/common/StatusBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog';
 import { cn } from '@/components/ui/cn';
-import { Skeleton } from '@/components/ui/skeleton';
+import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/toast';
-import { apiGet, apiPost, describeError } from '@/lib/api';
-import { formatDateTime, formatRelative } from '@/lib/format';
+import { apiPost, cancelTask, describeError, listTasks } from '@/lib/api';
+import { formatDateTime, formatRelative, statusLabel } from '@/lib/format';
+import { useTableState } from '@/lib/hooks/useTableState';
 import { queryKeys } from '@/lib/query';
-import type { CancelResult, Paginated, Task, TaskStatus } from '@/lib/types';
+import type { CancelResult, CancelScope, Task, TaskStatus } from '@/lib/types';
 
 /**
- * 任务（spec §13.2 `/tasks`）：
- * 状态分组（进行中 / 待确认 / 已完成 / 失败）+ 进度条 + 取消与对账。
- * `status_unknown` 单独区块解释「可能仍在远端执行」——不假装已完成或失败。
+ * 任务（spec §A.3.11 / §13.2 / F-07、F-18）：
+ * 与 `/calls` 完全一致的交互（`DataTable` + 搜索 + 筛选 + 排序 + 分页），
+ * `status_unknown` 与 `canceling` 都必须**在行内**解释清楚：
+ * 「可能仍在远端执行，请先对账」/「已请求取消（范围）」—— 不假装已完成或已失败。
  */
 
-const GROUPS: { id: string; title: string; statuses: TaskStatus[]; hint: string }[] = [
-  { id: 'active', title: '进行中', statuses: ['queued', 'running', 'canceling'], hint: 'worker 正在处理' },
-  {
-    id: 'unknown',
-    title: '待确认',
-    statuses: ['status_unknown'],
-    hint: '无法判定上游是否已受理：可能仍在远端执行，请先对账再决定是否重投',
-  },
-  { id: 'done', title: '已完成', statuses: ['succeeded', 'canceled'], hint: '终态' },
-  { id: 'failed', title: '失败', statuses: ['failed'], hint: '可按错误码决定是否重试' },
+const FILTER_KEYS = ['status', 'capability_key'] as const;
+/** `sort` 白名单（后端 `services/tasks.py:25`）：`created_at / updated_at / status` */
+const SORT_FIELDS = ['created_at', 'updated_at', 'status'] as const;
+
+const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
+  { value: 'queued', label: '排队中' },
+  { value: 'running', label: '进行中' },
+  { value: 'canceling', label: '取消中' },
+  { value: 'succeeded', label: '成功' },
+  { value: 'failed', label: '失败' },
+  { value: 'canceled', label: '已取消' },
+  { value: 'status_unknown', label: '状态未知' },
 ];
+
+const CANCEL_SCOPE_LABEL: Record<CancelScope, string> = {
+  none: '未请求取消',
+  pending_submit: '提交中取消，拿到上游 id 后会追取消',
+  remote: '上游已受理，等上游确认',
+  local_only: '上游不支持取消，仅停止本地等待（远端可能仍在执行）',
+};
+
+function ProgressCell({ task }: { task: Task }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div
+        role="progressbar"
+        aria-valuenow={task.progress_percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={`${task.capability_key} 进度`}
+        className="h-1.5 w-full min-w-[80px] overflow-hidden rounded-full bg-[var(--sr-surface-sunken)]"
+      >
+        <div
+          className={cn(
+            'h-full rounded-full',
+            task.status === 'failed'
+              ? 'bg-danger'
+              : task.status === 'status_unknown' || task.status === 'canceling'
+                ? 'bg-warn'
+                : 'bg-accent',
+          )}
+          style={{ width: `${Math.min(100, Math.max(0, task.progress_percent))}%` }}
+        />
+      </div>
+      <span className="text-12 text-content-muted">
+        {task.progress_percent}%
+        {task.progress_stage ? ` · ${task.progress_stage}` : ''}
+        {` · 尝试 ${task.attempts}/${task.max_attempts}`}
+      </span>
+    </div>
+  );
+}
 
 export default function TasksPage() {
   const queryClient = useQueryClient();
@@ -42,29 +85,50 @@ export default function TasksPage() {
   const [cancelResult, setCancelResult] = React.useState<CancelResult | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
 
-  const tasks = useQuery<Paginated<Task>>({
-    queryKey: queryKeys.tasks.list({ page: 1, page_size: 100, sort: '-updated_at' }),
-    queryFn: () => apiGet<Paginated<Task>>('/admin/tasks', { page: 1, page_size: 100, sort: '-updated_at' }),
+  const table = useTableState({
+    defaultSort: '-updated_at',
+    filterKeys: FILTER_KEYS,
+    sortWhitelist: SORT_FIELDS,
+  });
+
+  const tasks = useQuery({
+    queryKey: queryKeys.tasks.list(table.requestParams),
+    queryFn: () =>
+      listTasks({
+        page: table.requestParams.page,
+        page_size: table.requestParams.page_size,
+        sort: table.requestParams.sort,
+        q: table.requestParams.q,
+        status: (table.filters['status'] ?? '') as TaskStatus | '',
+        capability_key: table.filters['capability_key'] ?? '',
+      }),
     refetchInterval: 15_000,
   });
 
   const invalidate = async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: queryKeys.tasks.list({ page: 1, page_size: 100, sort: '-updated_at' }) });
+    await queryClient.invalidateQueries({ queryKey: ['tasks'] });
     await queryClient.invalidateQueries({ queryKey: queryKeys.overview() });
   };
 
-  const cancelTask = useMutation({
-    mutationFn: async (taskId: string) => apiPost<CancelResult>(`/admin/tasks/${taskId}/cancel`, {}),
+  const cancel = useMutation({
+    mutationFn: async (taskId: string) => cancelTask(taskId),
     onMutate: (taskId) => setBusyId(taskId),
     onSuccess: async (result) => {
       setCancelResult(result);
       toast({
-        title: result.cancel_scope === 'remote' ? '已请求远端取消' : '仅停止了本地等待',
-        description:
+        title:
           result.cancel_scope === 'remote'
-            ? '上游已受理取消请求。'
-            : '上游不支持取消，远端可能仍在执行——请到任务里对账确认。',
-        tone: result.cancel_scope === 'remote' ? 'ok' : 'warn',
+            ? '已请求远端取消'
+            : result.cancel_scope === 'pending_submit'
+              ? '已请求取消（提交中）'
+              : result.cancel_scope === 'local_only'
+                ? '仅停止了本地等待'
+                : '任务已是终态',
+        description:
+          result.cancel_scope === 'none'
+            ? '该任务已结束，无需取消。'
+            : CANCEL_SCOPE_LABEL[result.cancel_scope],
+        tone: result.cancel_scope === 'remote' || result.cancel_scope === 'pending_submit' ? 'ok' : 'warn',
       });
       await invalidate();
     },
@@ -81,7 +145,7 @@ export default function TasksPage() {
   });
 
   const reconcile = useMutation({
-    mutationFn: async (taskId: string) => apiPost<Task>(`/admin/tasks/${taskId}/reconcile`, {}),
+    mutationFn: async (taskId: string) => reconcileTask(taskId),
     onMutate: (taskId) => setBusyId(taskId),
     onSuccess: async () => {
       toast({ title: '已对账', description: '状态已按上游结果更新。', tone: 'ok' });
@@ -94,181 +158,227 @@ export default function TasksPage() {
     onSettled: () => setBusyId(null),
   });
 
-  const items = tasks.data?.items ?? [];
+  const filters: FilterChipGroup[] = [
+    {
+      id: 'status',
+      label: '状态',
+      value: table.filters['status'] ?? '',
+      options: STATUS_OPTIONS.map((option) => ({ value: option.value, label: option.label })),
+    },
+  ];
 
-  if (tasks.isLoading) {
-    return (
-      <div className="flex flex-col gap-3" aria-busy="true">
-        <Skeleton height={56} rounded="md" />
-        {Array.from({ length: 4 }).map((_, index) => (
-          <Skeleton key={index} height={72} rounded="md" />
-        ))}
-      </div>
-    );
-  }
+  const pendingUnknown = (tasks.data?.items ?? []).filter((task) => task.status === 'status_unknown').length;
 
-  if (tasks.isError) {
-    const info = describeError(tasks.error);
-    return (
-      <EmptyState
-        kind={info.code === 'NETWORK_OFFLINE' ? 'offline' : 'unavailable'}
-        title={info.message}
-        description={info.hint ?? undefined}
-        requestId={info.requestId}
-        actionLabel="重试"
-        onAction={() => void tasks.refetch()}
-      />
-    );
-  }
+  const columns: DataTableColumn<Task>[] = [
+    {
+      id: 'capability_key',
+      header: '能力',
+      cardTitle: true,
+      cell: (row) => (
+        <div className="flex flex-col">
+          <span className="sr-mono text-13 text-content">{row.capability_key}</span>
+          <span className="flex items-center gap-1">
+            <Badge tone="outline" mono>
+              {row.mode}
+            </Badge>
+            <span className="text-12 text-content-muted">{statusLabel(row.status)}</span>
+          </span>
+        </div>
+      ),
+    },
+    {
+      id: 'status',
+      header: '状态',
+      sortable: true,
+      cell: (row) => (
+        <div className="flex flex-col gap-1">
+          <StatusBadge kind="task" status={row.status} />
+          {row.cancel_requested_at && row.status !== 'canceled' ? (
+            <span className="flex flex-wrap items-center gap-1 text-12">
+              <Badge tone="warn" dot>
+                已请求取消
+              </Badge>
+              <span className="text-content-muted">
+                {formatRelative(row.cancel_requested_at)} · {CANCEL_SCOPE_LABEL[row.cancel_scope]}
+              </span>
+            </span>
+          ) : null}
+          {row.status === 'status_unknown' ? (
+            <span className="flex items-start gap-1 text-12 text-warn">
+              <CircleAlert size={12} strokeWidth={1.75} className="mt-0.5 shrink-0" aria-hidden />
+              结果不确定：可能仍在远端执行，请先「对账」
+            </span>
+          ) : null}
+          {row.error_code ? (
+            <span className="text-12 text-content-muted">
+              错误码 <code className="sr-mono text-danger">{row.error_code}</code>
+              {row.error_detail_redacted ? ` · ${row.error_detail_redacted}` : ''}
+              {row.failure_class ? ` · 分类 ${row.failure_class}` : ''}
+            </span>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      id: 'progress',
+      header: '进度',
+      hideOnCard: true,
+      cell: (row) => <ProgressCell task={row} />,
+    },
+    {
+      id: 'upstream_task_id',
+      header: '上游任务',
+      hideOnCard: true,
+      cell: (row) =>
+        row.upstream_task_id ? (
+          <span className="sr-mono text-12 text-content-muted">{row.upstream_task_id}</span>
+        ) : (
+          <span className="text-12 text-content-muted">—</span>
+        ),
+    },
+    {
+      id: 'request_id',
+      header: 'request_id',
+      hideOnCard: true,
+      cell: (row) => <span className="sr-mono text-12 text-content-muted">{row.request_id}</span>,
+    },
+    {
+      id: 'updated_at',
+      header: '更新时间',
+      sortable: true,
+      align: 'right',
+      cell: (row) => (
+        <span className="flex flex-col items-end">
+          <span className="text-13 text-content-muted">{formatRelative(row.updated_at)}</span>
+          <span className="text-12 text-content-muted">
+            {row.finished_at ? `完成 ${formatDateTime(row.finished_at)}` : `创建 ${formatDateTime(row.created_at)}`}
+          </span>
+        </span>
+      ),
+    },
+    {
+      id: 'actions',
+      header: '操作',
+      align: 'right',
+      cell: (row) => (
+        <div className="flex items-center justify-end gap-1">
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={busyId === row.id}
+            disabled={row.status !== 'status_unknown'}
+            onClick={(event) => {
+              event.stopPropagation();
+              reconcile.mutate(row.id);
+            }}
+          >
+            对账
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={busyId === row.id}
+            disabled={
+              ['succeeded', 'failed', 'canceled'].includes(row.status) || Boolean(row.cancel_requested_at)
+            }
+            onClick={(event) => {
+              event.stopPropagation();
+              setCancelResult(null);
+              setCancelTarget(row);
+            }}
+            icon={<XCircle size={14} strokeWidth={1.75} />}
+          >
+            {row.cancel_requested_at ? '已请求取消' : '取消'}
+          </Button>
+        </div>
+      ),
+    },
+  ];
 
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
         title="任务"
-        description="异步任务的真实状态。「待确认」表示无法判定上游是否已受理——可能仍在远端执行。"
+        description="异步任务的真实状态。搜索覆盖 request_id / 能力 key / 上游任务号；「状态未知」表示可能仍在远端执行。"
         actions={
-          <Button variant="secondary" size="sm" onClick={() => void tasks.refetch()} icon={<RefreshCw size={16} strokeWidth={1.75} />}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void tasks.refetch()}
+            icon={<RefreshCw size={16} strokeWidth={1.75} />}
+          >
             刷新
           </Button>
         }
       />
 
-      {items.length === 0 ? (
-        <EmptyState
-          kind="empty"
-          title="还没有任务"
-          description="以 async 模式调用能力后，任务会出现在这里。"
-        />
-      ) : (
-        GROUPS.map((group) => {
-          const groupTasks = items.filter((task) => group.statuses.includes(task.status));
-          if (groupTasks.length === 0 && group.id !== 'unknown') return null;
-          return (
-            <section key={group.id} aria-label={group.title} className="sr-card p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="flex items-center gap-2 text-16 font-semibold text-content">
-                  {group.title}
-                  <Badge tone={group.id === 'failed' ? 'danger' : group.id === 'unknown' ? 'warn' : 'neutral'}>
-                    {groupTasks.length}
-                  </Badge>
-                </h2>
-                <p className="text-12 text-content-muted">{group.hint}</p>
-              </div>
+      <section aria-label="任务筛选" className="sr-card flex flex-wrap items-end gap-2 p-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-12 text-content-muted">能力 key</span>
+          <input
+            value={table.filters['capability_key'] ?? ''}
+            onChange={(event) => table.setFilter('capability_key', event.target.value)}
+            aria-label="能力 key"
+            placeholder="text.chat"
+            className="h-8 w-[180px] rounded border border-border bg-surface px-2 text-13 sr-mono focus-visible:outline-none focus-visible:shadow-[var(--sr-focus-ring)]"
+          />
+        </label>
+        <Button variant="ghost" size="sm" onClick={table.resetFilters}>
+          清空筛选
+        </Button>
+        <p className="ml-auto text-12 text-content-muted">
+          status_unknown 与 canceling 都是「未终结」状态，不能当作成功或失败。
+        </p>
+      </section>
 
-              {group.id === 'unknown' && groupTasks.length === 0 ? (
-                <p className="mt-2 text-13 text-content-muted">
-                  目前没有需要确认的任务。出现 `status_unknown` 时，这里会解释「可能仍在远端执行」并提供对账入口。
-                </p>
-              ) : (
-                <ul className="mt-2 divide-y divide-[var(--sr-border)]">
-                  {groupTasks.map((task) => (
-                    <li key={task.id} className="flex flex-col gap-2 py-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <StatusBadge kind="task" status={task.status} />
-                        <span className="sr-mono text-13 text-content">{task.capability_key}</span>
-                        <Badge tone="outline" mono>
-                          {task.mode}
-                        </Badge>
-                        <span className="text-12 text-content-muted">
-                          更新 {formatRelative(task.updated_at)} · 尝试 {task.attempts}/{task.max_attempts}
-                        </span>
-                        {task.upstream_task_id ? (
-                          <span className="sr-mono text-12 text-content-muted">上游 {task.upstream_task_id}</span>
-                        ) : null}
-                        <span className="ml-auto flex items-center gap-1">
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            loading={busyId === task.id}
-                            disabled={task.status !== 'status_unknown'}
-                            onClick={() => reconcile.mutate(task.id)}
-                          >
-                            对账
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            loading={busyId === task.id}
-                            disabled={['succeeded', 'failed', 'canceled'].includes(task.status)}
-                            onClick={() => {
-                              setCancelResult(null);
-                              setCancelTarget(task);
-                            }}
-                            icon={<XCircle size={14} strokeWidth={1.75} />}
-                          >
-                            取消
-                          </Button>
-                        </span>
-                      </div>
+      {/* status_unknown 是独立语义：可能仍在远端执行，绝不能读成失败或成功 */}
+      {pendingUnknown > 0 ? (
+        <section
+          aria-label="待确认任务"
+          className="flex flex-wrap items-start gap-2 rounded border border-warn bg-[var(--sr-warn-weak)] px-3 py-2 text-13 text-content"
+        >
+          <CircleAlert size={16} strokeWidth={1.75} className="mt-0.5 shrink-0 text-warn" aria-hidden />
+          <div>
+            <p className="font-medium">当前页有 {pendingUnknown} 个「状态未知」任务</p>
+            <p className="mt-0.5 text-12 text-content-muted">
+              请求已发出但没有拿到确定结果，可能仍在远端执行。请先点该行「对账」确认上游状态，
+              再决定是否重投——直接重投可能产生双份费用。
+            </p>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="ml-auto"
+            onClick={() => table.setFilter('status', 'status_unknown')}
+          >
+            只看状态未知
+          </Button>
+        </section>
+      ) : null}
 
-                      {/* 进度条 */}
-                      <div className="flex items-center gap-2">
-                        <div
-                          role="progressbar"
-                          aria-valuenow={task.progress_percent}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          aria-label={`${task.capability_key} 进度`}
-                          className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--sr-surface-sunken)]"
-                        >
-                          <div
-                            className={cn(
-                              'h-full rounded-full',
-                              task.status === 'failed'
-                                ? 'bg-danger'
-                                : task.status === 'status_unknown'
-                                  ? 'bg-warn'
-                                  : 'bg-accent',
-                            )}
-                            style={{ width: `${Math.min(100, Math.max(0, task.progress_percent))}%` }}
-                          />
-                        </div>
-                        <span className="text-12 text-content-muted">
-                          {task.progress_percent}%{task.progress_stage ? ` · ${task.progress_stage}` : ''}
-                        </span>
-                      </div>
-
-                      {task.status === 'status_unknown' ? (
-                        <div className="rounded border border-warn bg-[var(--sr-warn-weak)] px-2 py-1.5">
-                          <p className="flex items-start gap-1.5 text-12 text-content">
-                            <CircleAlert size={12} strokeWidth={1.75} className="mt-0.5 text-warn" aria-hidden />
-                            可能仍在远端执行：请求已发出但未收到响应。请先「对账」确认上游状态，避免重复提交产生双份费用。
-                          </p>
-                        </div>
-                      ) : null}
-
-                      {task.error_code ? (
-                        <p className="text-12 text-content-muted">
-                          错误码 <code className="sr-mono text-danger">{task.error_code}</code>
-                          {task.error_detail_redacted ? ` · ${task.error_detail_redacted}` : ''}
-                          {task.failure_class ? ` · 分类 ${task.failure_class}` : ''}
-                        </p>
-                      ) : null}
-
-                      <p className="text-12 text-content-muted">
-                        request_id <code className="sr-mono select-all">{task.request_id}</code> · 创建 {formatDateTime(task.created_at)}
-                        {task.finished_at ? ` · 完成 ${formatDateTime(task.finished_at)}` : ''}
-                      </p>
-
-                      {task.output_files.length > 0 ? (
-                        <ul className="flex flex-wrap gap-1">
-                          {task.output_files.map((file) => (
-                            <li key={file.file_id}>
-                              <Badge tone="outline" mono>
-                                {file.file_id} · {file.mime}
-                              </Badge>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          );
-        })
-      )}
+      <DataTable
+        caption="任务列表"
+        columns={columns}
+        rows={tasks.data?.items}
+        rowKey={(row) => row.id}
+        total={tasks.data?.total}
+        page={table.page}
+        pageSize={table.pageSize}
+        sort={table.sort}
+        q={table.q}
+        onPageChange={table.setPage}
+        onPageSizeChange={table.setPageSize}
+        onSortChange={table.setSort}
+        onQChange={table.setQ}
+        filters={filters}
+        onFilterChange={table.setFilter}
+        loading={tasks.isLoading}
+        error={tasks.error}
+        onRetry={() => void tasks.refetch()}
+        emptyKind="first-use"
+        emptyTitle="还没有任务"
+        emptyDescription="以 async 模式调用能力后，任务会出现在这里。"
+      />
 
       <Dialog
         open={Boolean(cancelTarget)}
@@ -281,11 +391,7 @@ export default function TasksPage() {
       >
         <DialogContent
           title="取消任务"
-          description={
-            cancelTarget
-              ? `${cancelTarget.capability_key} · ${cancelTarget.status}`
-              : undefined
-          }
+          description={cancelTarget ? `${cancelTarget.capability_key} · ${cancelTarget.status}` : undefined}
           width="sm"
           footer={
             <>
@@ -297,10 +403,10 @@ export default function TasksPage() {
               <Button
                 variant="danger"
                 size="sm"
-                loading={cancelTask.isPending}
+                loading={cancel.isPending}
                 disabled={!cancelTarget || Boolean(cancelResult)}
                 onClick={() => {
-                  if (cancelTarget) cancelTask.mutate(cancelTarget.id);
+                  if (cancelTarget) cancel.mutate(cancelTarget.id);
                 }}
               >
                 确认取消
@@ -320,39 +426,46 @@ export default function TasksPage() {
               </p>
               <p className="text-content-muted">
                 取消是否触及远端取决于上游支持情况（当前 cancel_capability: {cancelTarget.cancel_capability}）。
-                若仅能停止本地等待，远端可能继续执行并产生费用。
+                提交过程中取消只会记下取消意图（`cancel_scope = pending_submit`，返回 202 + `canceling`），
+                上游可能继续执行并产生费用。
               </p>
               {cancelResult ? (
                 <div
                   className={cn(
                     'rounded px-2 py-1.5',
-                    cancelResult.cancel_scope === 'remote'
+                    cancelResult.cancel_scope === 'remote' || cancelResult.cancel_scope === 'pending_submit'
                       ? 'border border-ok bg-[var(--sr-ok-weak)]'
                       : 'border border-warn bg-[var(--sr-warn-weak)]',
                   )}
                 >
                   <p className="text-content">
-                    取消范围：{cancelResult.cancel_scope === 'remote' ? '远端已受理' : '仅本地'}
+                    取消范围：{CANCEL_SCOPE_LABEL[cancelResult.cancel_scope]}
                   </p>
-                  <p className="mt-0.5 text-12 text-content-muted">当前状态：{cancelResult.status}</p>
+                  <p className="mt-0.5 text-12 text-content-muted">
+                    当前状态：{statusLabel(cancelResult.status)}
+                    {cancelResult.note ? ` · ${cancelResult.note}` : ''}
+                  </p>
                   {cancelResult.cancel_scope === 'local_only' ? (
                     <p className="mt-1 text-12 text-content-muted">
-                      建议到「任务」里对该任务执行「对账」，确认上游是否仍在运行。
+                      建议在上表对该任务执行「对账」，确认上游是否仍在运行。
                     </p>
                   ) : null}
                 </div>
               ) : null}
-              {cancelTask.isError ? (
-                <RequestIdCopy requestId={describeError(cancelTask.error).requestId ?? ''} />
-              ) : null}
+              {cancel.isError ? <RequestIdCopy requestId={describeError(cancel.error).requestId ?? ''} /> : null}
             </div>
           ) : null}
         </DialogContent>
       </Dialog>
 
       <p className="text-12 text-content-muted">
-        提示：任务列表按更新时间倒序，最多展示 100 条；历史数据受「数据保留」设置约束（见设置页）。
+        提示：默认按更新时间倒序；历史数据受「数据保留」设置约束（见设置页）。
       </p>
     </div>
   );
+}
+
+/** 对账（`POST /admin/tasks/{id}/reconcile`）：结果不确定时按上游重算状态 */
+async function reconcileTask(taskId: string): Promise<Task> {
+  return apiPost<Task>(`/admin/tasks/${taskId}/reconcile`, {});
 }

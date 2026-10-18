@@ -1,18 +1,22 @@
-"""限流：登录固定窗口 + 通用速率/并发/配额计数器（§7.3 / §7.10）。"""
+"""限流：登录固定窗口 + 通用速率/并发/配额计数器（§7.3 / §7.10 / §A.3.4）。"""
 
 from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 
 from ..db import db_session, db_write, now_iso, uuid_pk
 from ..errors import ApiError, Code
 from ..models import LoginAttempt, QuotaCounter, QuotaLimit, RateCounter
+from ..models.access import SCOPE_TYPES
 from ..settings import settings
 
 WINDOW_SECONDS = 60
+
+#: 预算超限时的统一 hint（§A.3.4）
+BUDGET_HINT = "提高该作用域预算，或在设置页调整默认预算"
 
 
 def _dt(value: str | None) -> datetime | None:
@@ -120,10 +124,16 @@ def check_and_count(
     concurrency: int | None = None,
     daily_calls: int | None = None,
 ) -> None:
-    """检查并累加一个调用。四类 scope：token / capability / provider / global。
+    """检查并累加一个调用。五类 scope 见 `SCOPE_TYPES`：token / agent / capability / provider / global。
 
-    检查顺序：令牌 → 能力 → 提供商 → 全局（调用方按此顺序逐个调用本函数）。
+    检查顺序：令牌 → Agent → 能力 → 提供商 → 全局（调用方按此顺序逐个调用本函数）。
     """
+    if scope_type not in SCOPE_TYPES:
+        raise ApiError(
+            Code.VALIDATION_FAILED,
+            message=f"未知的配额作用域：{scope_type}",
+            details={"supported": list(SCOPE_TYPES)},
+        )
     limit = _limits_for(scope_type, scope_id)
     eff_rpm = rpm if rpm is not None else (limit.rpm if limit else None)
     eff_conc = concurrency if concurrency is not None else (limit.concurrency if limit else None)
@@ -193,23 +203,47 @@ def check_and_count(
         qc.updated_at = now_iso()
 
 
-def release_concurrency(*, scope_type: str, scope_id: str) -> None:
+def _counter_id(scope_type: str, scope_id: str, window: str) -> str:
+    return hashlib.sha256(f"{scope_type}|{scope_id}|{window}|{WINDOW_SECONDS}".encode()).hexdigest()[:32]
+
+
+def release_concurrency(*, scope_type: str, scope_id: str) -> bool:
+    """归还一个并发名额；**幂等**，永远不会把计数减成负数（§A.3.4 / T-46）。
+
+    只递减「存在且 > 0」的计数器：重复释放、窗口已翻页、计数器不存在都返回 `False`
+    且不写任何行（异步任务终态释放可能在提交后很久才发生，不能因此新建一个并发为 -1 的行）。
+    """
     window = _window_start()
-    counter_id = hashlib.sha256(
-        f"{scope_type}|{scope_id}|{window}|{WINDOW_SECONDS}".encode()
-    ).hexdigest()[:32]
     with db_write() as s:
-        counter = s.get(RateCounter, counter_id)
-        if counter and counter.concurrent > 0:
-            counter.concurrent -= 1
-            counter.updated_at = now_iso()
+        counter = s.get(RateCounter, _counter_id(scope_type, scope_id, window))
+        if counter is None or counter.concurrent <= 0:
+            # 窗口已翻页：退回到该作用域最近一个仍有并发余量的窗口（同一分钟内的常见情况）
+            counter = s.scalar(
+                select(RateCounter)
+                .where(
+                    RateCounter.scope_type == scope_type,
+                    RateCounter.scope_id == scope_id,
+                    RateCounter.concurrent > 0,
+                )
+                .order_by(desc(RateCounter.window_start))
+            )
+        if counter is None or counter.concurrent <= 0:
+            return False
+        counter.concurrent -= 1
+        counter.updated_at = now_iso()
+        return True
 
 
-def record_cost(*, scope_type: str, scope_id: str, cost_usd: float) -> None:
-    if cost_usd <= 0:
-        return
+def record_cost(*, scope_type: str, scope_id: str, cost_usd: float) -> dict:
+    """把成本累加到 `quota_counters.cost_usd` 的**当日 + 当月**两行，返回累计值。
+
+    `rate_counters` 只有 `calls`/`concurrent`，成本只记在 `quota_counters`（§A.3.4-1）。
+    """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     month = today[:7]
+    if not cost_usd or cost_usd <= 0:
+        return {"daily_usd": 0.0, "monthly_usd": 0.0, "applied": False}
+    totals = {"daily_usd": 0.0, "monthly_usd": 0.0}
     with db_write() as s:
         for period in (today, month):
             qc = s.scalar(
@@ -230,29 +264,57 @@ def record_cost(*, scope_type: str, scope_id: str, cost_usd: float) -> None:
                     updated_at=now_iso(),
                 )
                 s.add(qc)
-            qc.cost_usd += cost_usd
+            qc.cost_usd = round(float(qc.cost_usd or 0.0) + cost_usd, 6)
             qc.updated_at = now_iso()
+            totals["daily_usd" if period == today else "monthly_usd"] = qc.cost_usd
+    return {**totals, "applied": True}
 
 
-def check_budget(*, scope_type: str, scope_id: str, max_cost_usd: float | None) -> None:
-    if not max_cost_usd or max_cost_usd <= 0:
+def budget_for(scope_type: str, scope_id: str) -> float | None:
+    """该作用域配置的月预算（`quota_limits.monthly_budget_usd`），没有则 None。"""
+    limit = _limits_for(scope_type, scope_id)
+    return getattr(limit, "monthly_budget_usd", None) if limit else None
+
+
+def check_budget(
+    *, scope_type: str, scope_id: str, max_cost_usd: float | None = None, period: str = "month"
+) -> None:
+    """预算判定（五作用域通用）：超限抛 402 `BUDGET_EXCEEDED`。
+
+    调用方逐层调用（token → agent → capability → provider → global），任一超限即拒绝；
+    `max_cost_usd` 显式给出时优先用它（令牌行上的 `budget_usd`），否则读 `quota_limits`。
+    """
+    limit = max_cost_usd
+    if limit is None:
+        limit = budget_for(scope_type, scope_id)
+    if not limit or limit <= 0:
         return
-    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    window_period = today if period == "day" else today[:7]
     with db_session() as s:
         qc = s.scalar(
             select(QuotaCounter).where(
                 QuotaCounter.scope_type == scope_type,
                 QuotaCounter.scope_id == scope_id,
-                QuotaCounter.period == month,
+                QuotaCounter.period == window_period,
             )
         )
-        spent = qc.cost_usd if qc else 0.0
-    if spent >= max_cost_usd:
+        spent = float(qc.cost_usd) if qc else 0.0
+    if spent >= limit:
         raise ApiError(
             Code.BUDGET_EXCEEDED,
-            message=f"预算已用尽（已用 ${spent:.4f} / 上限 ${max_cost_usd:.4f}）",
-            hint="请在系统设置中调整月预算",
-            details={"spent_usd": round(spent, 6), "budget_usd": max_cost_usd},
+            message=f"{scope_type} 级预算已用尽（已用 ${spent:.4f} / 上限 ${limit:.4f}）",
+            hint=BUDGET_HINT,
+            details={
+                "scope": scope_type,
+                "scope_id": scope_id,
+                "limit_usd": round(float(limit), 6),
+                "used_usd": round(spent, 6),
+                "hint": BUDGET_HINT,
+                # 兼容旧字段名（既有调用方/前端可能仍在读）
+                "spent_usd": round(spent, 6),
+                "budget_usd": float(limit),
+            },
         )
 
 

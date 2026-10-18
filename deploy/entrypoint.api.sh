@@ -3,6 +3,10 @@
 #
 #   entrypoint.api.sh api      # 启动前 quick 备份 → 迁移/初始化 → uvicorn
 #   entrypoint.api.sh worker   # 等 DB 就绪 → python -m skillrouter_api.worker
+#   entrypoint.api.sh run <cmd...>   # 一次性命令：不做备份/迁移，直接 exec 剩余参数
+#                              # 例：docker compose run --rm --entrypoint /app/deploy/entrypoint.api.sh \
+#                              #       api run python scripts/backup.py --list
+#                              # 也可用环境变量 SKILLROUTER_ROLE=run 指定角色（§A.3.12 / F-22）。
 #
 # 行为与失败策略
 # --------------
@@ -17,9 +21,6 @@
 
 set -euo pipefail
 
-ROLE="${1:-api}"
-shift || true
-
 DATA_DIR="${SKILLROUTER_DATA_DIR:-/data}"
 DB_PATH="${SKILLROUTER_DB_PATH:-${DATA_DIR}/skillrouter.db}"
 APP_DIR="${APP_DIR:-/app}"
@@ -27,6 +28,20 @@ PORT="${SKILLROUTER_API_PORT:-8000}"
 
 log() { printf '[entrypoint] %s\n' "$*"; }
 fatal() { printf '[FATAL] %s %s\n' "$1" "${2:-}" >&2; exit 2; }
+
+# ── 角色解析（§A.3.12 / F-22）───────────────────────────────────────────────
+# 两种写法都支持，且优先级固定：
+#   ① `SKILLROUTER_ROLE=<角色>`：**环境变量优先**，此时所有位置参数都是要执行的命令/参数，
+#      不做 shift（否则 `-e SKILLROUTER_ROLE=run … api python x.py` 会把 `python` 当角色名）；
+#   ② `entrypoint.api.sh <角色> [参数…]`：首个位置参数是角色，其余是命令/参数。
+ROLE_FROM_ENV=0
+if [ -n "${SKILLROUTER_ROLE:-}" ]; then
+  ROLE="${SKILLROUTER_ROLE}"
+  ROLE_FROM_ENV=1
+else
+  ROLE="${1:-api}"
+  shift || true
+fi
 
 mkdir -p "${DATA_DIR}" "${DATA_DIR}/logs" "${DATA_DIR}/files" "${DATA_DIR}/backup" \
          "${DATA_DIR}/engine-builds" "${DATA_DIR}/aragon-home" "${DATA_DIR}/engine-runtime" \
@@ -93,6 +108,18 @@ wait_for_db() {
 cd "${APP_DIR}" || fatal "APP_DIR_MISSING" "${APP_DIR} 不存在"
 
 case "${ROLE}" in
+  # ── run：一次性命令透传（必须在 api|worker 之前判断，§A.3.12）──────────────
+  # 为什么不复用 `docker compose run --rm api python …`：镜像 ENTRYPOINT 是本脚本，
+  # `python` 会被当作角色名 → `[FATAL] UNKNOWN_ROLE`。`run` 角色把剩余参数原样 exec。
+  # 两种入口到这里时 `"$@"` 都已经是「要执行的命令」：位置参数写法已 shift 掉 `run`；
+  # 环境变量写法本来就没有吃掉位置参数。
+  run)
+    if [ "$#" -eq 0 ]; then
+      fatal "RUN_NO_COMMAND" "用法：entrypoint.api.sh run <命令>（例：run python scripts/backup.py --list）"
+    fi
+    log "run 角色（role_from_env=${ROLE_FROM_ENV}）：exec $*"
+    exec "$@"
+    ;;
   api)
     do_backup
     do_migrate
@@ -110,6 +137,6 @@ case "${ROLE}" in
     exec python -m skillrouter_api.worker "$@"
     ;;
   *)
-    fatal "UNKNOWN_ROLE" "用法：entrypoint.api.sh api|worker（收到 '${ROLE}'）"
+    fatal "UNKNOWN_ROLE" "用法：entrypoint.api.sh api|worker|run（收到 '${ROLE}'）"
     ;;
 esac
