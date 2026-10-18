@@ -10,7 +10,8 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # 默认分支是 master；main 一并保留，避免改名后流水线静默不跑
+    branches: [master, main]
   pull_request:
   workflow_dispatch:
     inputs:

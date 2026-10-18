@@ -506,3 +506,24 @@ call_logs.needs_reconcile / engine_upgrade_runs.verify_status / engine_upgrade_r
 
 真实第三方凭证联调、真实模型推理、真实外部 Agent / MCP 客户端安装、`docker compose up`、
 目标硬件性能基线、真实候选版本升级 —— 仍为**待验证**。
+
+### 10.5 本轮补跑的三个联通性脚本（README 引用的数字出处）
+
+README 的「质量与证据」表引用的三个脚本结果，本轮重新跑了一遍（同一天、同一台机器、
+api/worker/gateway/web 四进程由 `start.ps1` 起在 8000/8500/3000）：
+
+| 命令 | 输出 |
+|---|---|
+| `python scripts/e2e_live.py` | `端到端结果：70/70 项通过`（§2 记录的是 58 项，此后陆续补了 12 项：测试返回体形状、`test_runs[].ok` 类型、24h 证据、签名 URL 上传/下载/过期、维护模式三条、主密钥轮换后仍可调用等） |
+| `python scripts/check_web.py` | `前端联通性：9/9 项通过` |
+| `python scripts/check_gateway.py` | `网关联通性：12/12 项通过`（含热切换后版本未漂移） |
+
+迁移状态同步复核：
+
+```
+cd apps/api && python -m alembic -c migrations/alembic.ini upgrade head
+→ 无输出（已在 head）；PRAGMA user_version=2，alembic_version=0003_iteration2，49 表
+```
+
+> 这三个脚本用的都是真实进程与真实 HTTP（上游为本机 echo 服务），因此它们证明的是
+> **链路可用**，不证明**第三方上游可用** —— 后者仍按 §10.4 保持「待验证」。

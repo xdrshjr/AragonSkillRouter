@@ -17,7 +17,7 @@
 | 排查报错 | [runbook/troubleshooting.md](runbook/troubleshooting.md) | 附录 A 每个错误码 → 原因 / 处置 / 定位命令 |
 | 核对验收 | [runbook/verification-checklist.md](runbook/verification-checklist.md) | §15.2/§15.3/§15.4/§15.5 的复现步骤、最小凭证、待验证登记 |
 | 了解实现与 spec 的差异 | [plans/skill-router/implementation-notes.md](plans/skill-router/implementation-notes.md) | 逐节映射 + 已实现/部分/未实现/待验证 + 偏差解释 |
-| 读设计契约 | [plans/skill-router/spec.md](plans/skill-router/spec.md) | v2.0，2019 行，实现以它为准 |
+| 读设计契约 | [plans/skill-router/spec.md](plans/skill-router/spec.md) | v2.0，3300+ 行，实现以它为准 |
 | 查上游 AragonAgent 事实 | [plans/skill-router/aragonagent-upstream.md](plans/skill-router/aragonagent-upstream.md) | 实测记录与能力边界 |
 
 ## 文档清单
