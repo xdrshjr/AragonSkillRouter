@@ -252,16 +252,20 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     const detail = sessionDetail.data;
     if (!detail) return;
+    // 服务端字段缺失（版本差、灰度中）不应把整个 (app) 布局打成 client-side exception：
+    // 这里一律按空集处理，退化成「没有历史」而不是白屏。
+    const turns = Array.isArray(detail.turns) ? detail.turns : [];
+    const toolCalls = Array.isArray(detail.tool_calls) ? detail.tool_calls : [];
     setMessages((prev) => {
       // 没有实时消息时以服务端历史为准
       if (prev.length > 0) return prev;
-      return buildMessagesFromTurns(detail.turns);
+      return buildMessagesFromTurns(turns);
     });
-    if (detail.tool_calls.length > 0) {
+    if (toolCalls.length > 0) {
       setTimeline((prev) =>
         prev.length > 0
           ? prev
-          : detail.tool_calls.map((call) => ({
+          : toolCalls.map((call) => ({
               id: call.id,
               kind: toolKind(call.tool_name),
               title: call.tool_name,
@@ -273,7 +277,7 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
             })),
       );
     }
-    if (detail.todos && detail.todos.length > 0) setTodos(detail.todos);
+    if (Array.isArray(detail.todos) && detail.todos.length > 0) setTodos(detail.todos);
   }, [sessionDetail.data]);
 
   /* 自动挑选/创建会话 */

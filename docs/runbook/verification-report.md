@@ -441,3 +441,68 @@ call_logs.needs_reconcile / engine_upgrade_runs.verify_status / engine_upgrade_r
 
 真实第三方凭证联调、真实外部 Agent / MCP 客户端、真实 Docker Compose、目标硬件性能基线、真实候选版本升级
 仍为**待验证**（P1/P2/P3/P5/P6/P8/P9/P11）。`blocked` 与 `skipped` 一律不计入 `passed`。
+
+---
+
+## 10. 第 3 轮：有头浏览器自动化巡检（2026-10-18）
+
+本节只登记**本轮实际跑过的命令与输出**；口径不变：没有证据的不写「已验证」。
+
+**环境**：Windows 10.0.26200；Python 3.11.7；Node v22.18.0；SQLite（本地文件）；
+浏览器 = 系统 Chrome（`channel=chrome`，有头）；`start.ps1` 起 api/worker/gateway/web 四进程，
+上游用本机 echo 服务（`http://127.0.0.1:8791`，`POST /v1/generate`）。
+
+### 10.1 自动化命令与结果
+
+| 套件 | 命令 | 结果 |
+|---|---|---|
+| 后端全量 | `cd apps/api && python -m pytest tests -q` | **全部通过**（退出码 0） |
+| 前端类型 | `cd apps/web && npx tsc --noEmit` | 0 错误 |
+| 前端 lint | `cd apps/web && npx next lint` | 0 warning / 0 error |
+| 浏览器 e2e（有头） | `cd apps/web && set SR_E2E_CHANNEL=chrome && npx playwright test --headed --workers=1` | **9 passed / 2 skipped**（skip 的两条要 `SR_E2E_AGENT=1` + 真实模型引擎） |
+
+浏览器 e2e 覆盖（`e2e/smoke-headed.spec.ts` 为本轮新增）：
+
+| 用例 | 断言 |
+|---|---|
+| 全部管理台路由零控制台错误 | 13 条路由逐个访问，控制台 error / pageerror / HTTP≥400 **全部为空** |
+| `/healthz` 经反代返回维护标志 | 200 + `maintenance` 为 boolean（维护横幅依赖它） |
+| 高对话框完整居中，底部按钮可点 | 「签发令牌」对话框 `y ≥ 0`、`y+height ≤ 视口`、垂直居中误差 ≤8px、主按钮在视口内 |
+| 调用详情抽屉渲染耗时分解 | `排队 / 上游 / 总计` 可见，无 pageerror |
+
+### 10.2 本轮通过浏览器复现并修掉的缺陷（12 项）
+
+| # | 现象（用户可见） | 根因 | 修法 |
+|---|---|---|---|
+| B1 | 首次登录按提示改完密码，又被弹回 `/change-password`，概览永远进不去 | 改密成功后 `(app)` 布局仍读到改密页缓存的 `/me`（`must_change_password: true`，staleTime 60s） | 改密成功后先 `setQueryData` 打补丁再 `invalidateQueries`，然后跳转 |
+| B2 | 「签发令牌」等较高的对话框下半截在视口外，主按钮**点不到** | `.sr-enter` 的 `animation ... both` 把 `transform: translateY(0)` 永久留在元素上，覆盖了 Tailwind 的 `-translate-y-1/2` 居中；实测 617px 高的对话框从 y=475 起 | keyframes 改用 `translate` 长属性（与 `transform` 共存），不再覆盖定位 |
+| B3 | 调用记录点开详情 → 整块白屏 | 前端读 `detail.data.timings.queue_ms`，后端返回 `latency_breakdown` | 类型与页面同时接受两种字段名，缺失时回落 `null`（不再抛异常） |
+| B4 | 用向导建的能力**永远发布不了**：400 `INPUT_SCHEMA_INVALID`（`output_schema.additionalProperties 必须为 false`） | 向导默认 `output_schema` 写成 `additionalProperties: true`；后端 `default_definition()` 写成 `{"type":"object"}`，同样违规 | 两处默认值改为 `additionalProperties: false` |
+| B5 | 所有 `Select` 的标签点击无效，读屏/自动化无法按标签定位控件 | `FormField` 只渲染 `label htmlFor={id}`，从不给子控件补 id（`Input` 手写了 id，`Select` 全都漏了） | `FormField` 对单元素子节点兜底补 `id` 与 `aria-describedby` |
+| B6 | 本地开发时每个页面都刷一条 404；维护横幅永远不出现 | 维护横幅读 `/healthz`，但 `next dev` 没有把 `/healthz` 反代到 FastAPI（生产靠 nginx 的 `location = /healthz`） | `next.config.mjs` 增加 `/healthz` rewrite，本地与容器行为一致 |
+| B7 | 能力状态显示英文 `testing`；状态筛选缺「测试中」 | 后端 `validate()` 通过后把能力推进为 `testing`，`StatusBadge`/筛选没有这一项 | 补 `testing → 测试中` 徽标与筛选项 |
+| B8 | 校验结果里的**警告**被显示成「错误」 | 后端 issue 字段叫 `level`，前端读 `severity` | 类型与渲染同时接受 `level`/`severity` |
+| B9 | 签发令牌页给出的安装命令把**完整令牌**写进 argv | `access.py` 把真实令牌拼进 `install_command`（CLI 自己会警告 `--token` 会进 shell 历史） | `install_command(token_stdin=True)`，统一 `--token-stdin`；令牌只出现在独立字段里 |
+| B10 | 每个页面都在控制台报一条 404 | 没有 favicon，浏览器请求 `/favicon.ico` 落空 | 新增 `app/icon.svg`（Next 自动注入 `<link rel="icon">`） |
+| B11 | 按文档写 `.\start.ps1 -Follow:$false` 直接报「找不到参数 Follow」 | 帮助注释写的是 `.PARAMETER Follow`，实际开关是 `-NoFollow` | 帮助注释改为 `.PARAMETER NoFollow` |
+| B12 | 既有 e2e 用例本身跑不起来：`56.000061 !== 56`、Alt+J 面板打不开、任务页断言常驻区块 | 亚像素精度断言；按键发生在布局 hydration 之前；断言了一个只在有 `status_unknown` 任务时才渲染的区块 | 改 `toBeCloseTo`、先等热键宿主挂载、改成与数据无关的不变量 |
+
+> B1/B2/B3/B4 属于「按 UI 提示操作也走不通」的阻断级缺陷；B5/B6/B8/B9 会稳定误导使用者，
+> 其余为可访问性/准确性/文档问题。全部改动都有对应回归：B1（手动复核 + 改密页）、B2/B3/B6（新增 e2e）、
+> B4（向导 → 测试 → 发布实跑通过）、B7/B8/B5（同一轮浏览器巡检 0 控制台错误）。
+
+### 10.3 有头浏览器实测通过的业务闭环
+
+1. 登录 → 强制改密 → 落到概览（不再回环）；
+2. `/providers` 新建提供商 → 详情添加 bearer 凭证（掩码 `echo-***9999`）→ `/credentials` 打开详情 → **检测有效性**（真实探测 echo `/models`，200，最近验证=刚刚）；
+3. `/capabilities/new` 向导（手工配置）→ 草稿 → `发送测试`（真实打到 echo，`succeeded`/HTTP 200）→ `发布 1.0.0` → 四态徽标 `已保存 / 测试通过 / 已发布 / 可调用`；
+4. `/access` 新建 Agent → 签发令牌（对话框完整可见、令牌只显示一次）→ 用令牌 `POST /api/v1/capabilities/text.generate.echo3/invoke` 拿到 `succeeded` → `/whoami`、`/capabilities` 正常；
+5. `/calls` 列表出现该次调用（耗时/重试/request_id）→ 点开详情看到路由决策、耗时分解、脱敏请求响应；
+6. `/skills` 手工建草稿 → 详情 → 预览 `SKILL.md` → 发布（输入确认词）→ 导出连接包 zip 下载成功；
+7. `/settings` 七个 Tab 全部渲染、保存往返成功（`已保存 · 刚刚`）；`/settings/engine` 「立即检测」返回 `最近检测=刚刚`、12 条能力状态表可读；无候选版本时「升级/验证」按钮按设计禁用；
+8. 浮窗 Agent：`Alt+J` 开关、跨路由保持、SSE `已连接`；**真实模型推理仍未验证**（本机无模型凭证，消息停在「排队中」）。
+
+### 10.4 本轮仍未闭环（口径不变）
+
+真实第三方凭证联调、真实模型推理、真实外部 Agent / MCP 客户端安装、`docker compose up`、
+目标硬件性能基线、真实候选版本升级 —— 仍为**待验证**。

@@ -65,7 +65,14 @@ def default_definition(key: str, name: str, kind: str) -> dict:
             "required": ["prompt"],
             "additionalProperties": False,
         },
-        "output_schema": {"type": "object"},
+        # spec §7.6 规则 4（见 I10）：input_schema 与 output_schema 的 additionalProperties
+        # 都必须是 false，否则 `validate_definition()` 直接判 error——默认草稿也就无法发布。
+        "output_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
         "examples": [],
         "compatibility_group": None,
         "failover": {"enabled": True, "max_switches": 2},

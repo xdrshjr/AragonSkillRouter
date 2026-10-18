@@ -505,8 +505,8 @@ export default function CapabilityDetailPage() {
               {issues.map((issue, index) => (
                 <li key={`${issue.code}-${index}`} className="py-1.5">
                   <p className="flex flex-wrap items-center gap-1.5 text-13">
-                    <Badge tone={issue.severity === 'warn' ? 'warn' : 'danger'}>
-                      {issue.severity === 'warn' ? '警告' : '错误'}
+                    <Badge tone={(issue.level ?? issue.severity) === 'warn' ? 'warn' : 'danger'}>
+                      {(issue.level ?? issue.severity) === 'warn' ? '警告' : '错误'}
                     </Badge>
                     <code className="sr-mono text-12 text-content-muted">{issue.path}</code>
                     <span className="text-content">{issue.message}</span>

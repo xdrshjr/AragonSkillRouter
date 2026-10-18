@@ -339,15 +339,15 @@ export default function CallsPage() {
                 <dl className="mt-1 grid grid-cols-3 gap-2 text-13">
                   <div>
                     <dt className="text-content-muted">排队</dt>
-                    <dd className="text-content">{formatDuration(detail.data.timings.queue_ms)}</dd>
+                    <dd className="text-content">{formatDuration(timingsOf(detail.data).queue_ms)}</dd>
                   </div>
                   <div>
                     <dt className="text-content-muted">上游</dt>
-                    <dd className="text-content">{formatDuration(detail.data.timings.upstream_ms)}</dd>
+                    <dd className="text-content">{formatDuration(timingsOf(detail.data).upstream_ms)}</dd>
                   </div>
                   <div>
                     <dt className="text-content-muted">总计</dt>
-                    <dd className="text-content">{formatDuration(detail.data.timings.total_ms)}</dd>
+                    <dd className="text-content">{formatDuration(timingsOf(detail.data).total_ms)}</dd>
                   </div>
                 </dl>
               </section>
@@ -410,4 +410,22 @@ export default function CallsPage() {
       </Drawer>
     </div>
   );
+}
+
+/**
+ * 调用详情里的耗时分解：后端字段名是 `latency_breakdown`（services/calls.py），
+ * 早期前端类型写成 `timings`，直接读 `timings.queue_ms` 会在详情抽屉里抛异常白屏。
+ * 这里两种名字都接受，缺失时统一返回 null，避免整页崩掉。
+ */
+function timingsOf(detail: CallDetail): {
+  queue_ms: number | null;
+  upstream_ms: number | null;
+  total_ms: number | null;
+} {
+  const source = detail.latency_breakdown ?? detail.timings ?? null;
+  return {
+    queue_ms: source?.queue_ms ?? null,
+    upstream_ms: source?.upstream_ms ?? null,
+    total_ms: source?.total_ms ?? null,
+  };
 }

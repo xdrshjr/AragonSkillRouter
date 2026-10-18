@@ -16,6 +16,10 @@ export default defineConfig({
     trace: 'on-first-retry',
     locale: 'zh-CN',
     timezoneId: 'Asia/Shanghai',
+    // SR_E2E_CHANNEL=chrome 时直接用系统 Chrome（离线机器上装不上 playwright 自带 chromium 的兜底）
+    ...(process.env.SR_E2E_CHANNEL
+      ? { channel: process.env.SR_E2E_CHANNEL as 'chrome' | 'msedge' }
+      : {}),
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: process.env.SR_BASE_URL

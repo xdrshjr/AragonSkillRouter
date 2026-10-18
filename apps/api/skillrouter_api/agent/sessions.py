@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from ..db import db_session, db_write, now_iso, uuid_pk
 from ..errors import ApiError, Code
 from ..logging import get_logger, redact
-from ..models import AgentSession, AgentTurn
+from ..models import AgentSession, AgentToolCall, AgentTurn
 from ..schemas.common import paginate
 from . import events as agent_events
 
@@ -63,6 +63,32 @@ def get_session(session_id: str) -> dict:
         turns = list(
             s.scalars(select(AgentTurn).where(AgentTurn.session_id == session_id).order_by(AgentTurn.ordinal))
         )
+        # 前端 `AgentSessionDetail.tool_calls` 是契约的一部分（用于从历史恢复时间线），
+        # 这里必须真的返回；此前漏掉该字段会让控制台读 `detail.tool_calls.length` 直接抛
+        # TypeError，把整个 (app) 布局打成 client-side exception。
+        tool_calls: list[dict] = []
+        if turns:
+            call_rows = list(
+                s.scalars(
+                    select(AgentToolCall)
+                    .where(AgentToolCall.turn_id.in_([t.id for t in turns]))
+                    .order_by(AgentToolCall.at)
+                )
+            )
+            tool_calls = [
+                {
+                    "id": c.id,
+                    "turn_id": c.turn_id,
+                    "tool_name": c.tool_name,
+                    # 前端字段名是 args_summary；库里叫 args_redacted（已脱敏）
+                    "args_summary": c.args_redacted or {},
+                    "result_summary": c.result_summary,
+                    "ok": None if c.ok is None else bool(c.ok),
+                    "duration_ms": c.duration_ms,
+                    "at": c.at,
+                }
+                for c in call_rows
+            ]
         return {
             "id": row.id,
             "title": row.title,
@@ -89,6 +115,7 @@ def get_session(session_id: str) -> dict:
                 }
                 for t in turns
             ],
+            "tool_calls": tool_calls,
             "events": agent_events.session_timeline(session_id, limit=100),
         }
 

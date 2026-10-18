@@ -159,7 +159,16 @@ export default function NewCapabilityPage() {
           required: ['prompt'],
           additionalProperties: false,
         },
-        output_schema: { type: 'object', additionalProperties: true },
+        // 平台规则（spec §7.6 规则 4，见规划文档 I10）要求 input_schema 与 output_schema
+        // 的 additionalProperties 都必须是 false。这里曾写成 additionalProperties: true，
+        // 结果向导建出来的草稿在「发布」时必然 400 INPUT_SCHEMA_INVALID，
+        // 用户只能去 Schema 页手改才能继续。
+        output_schema: {
+          $schema: 'https://json-schema.org/draft/2020-12/schema',
+          type: 'object',
+          properties: {},
+          additionalProperties: false,
+        },
         examples: [{ title: '最小示例', input: { prompt: '你好' } }],
         compatibility_group: compatGroup || null,
         failover: { enabled: true, max_switches: 2 },

@@ -25,8 +25,9 @@ test.describe('浮窗 Agent', () => {
     const dock = page.getByRole('button', { name: '打开 Agent' });
     await expect(dock).toBeVisible();
     const box = await dock.boundingBox();
-    expect(box?.width).toBe(56);
-    expect(box?.height).toBe(56);
+    // 高 DPI 下 boundingBox 会带亚像素误差（实测 56.000061），用近似比较
+    expect(box?.width).toBeCloseTo(56, 1);
+    expect(box?.height).toBeCloseTo(56, 1);
 
     await page.keyboard.press('Alt+KeyJ');
     const panel = page.getByRole('dialog', { name: 'Agent 面板' });
@@ -39,11 +40,14 @@ test.describe('浮窗 Agent', () => {
 
   test('面板跨路由保持打开状态', async ({ page }) => {
     await page.goto('/');
+    // 热键监听挂在 (app) 布局里的 AgentDock 上，必须等它挂载后再按键，
+    // 否则按键发生在 hydration 之前，面板不会打开（曾因此误判成功能缺陷）。
+    await expect(page.getByRole('button', { name: '打开 Agent' })).toBeVisible();
     await page.keyboard.press('Alt+KeyJ');
     const panel = page.getByRole('dialog', { name: 'Agent 面板' });
     await expect(panel).toBeVisible();
 
-    await page.getByRole('link', { name: '提供商' }).click();
+    await page.getByRole('link', { name: '提供商', exact: true }).click();
     await expect(panel).toBeVisible();
     await expect(page.getByRole('heading', { name: '提供商' })).toBeVisible();
   });

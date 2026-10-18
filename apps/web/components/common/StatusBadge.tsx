@@ -35,6 +35,9 @@ const ICON = { size: 12, strokeWidth: 1.75, 'aria-hidden': true } as const;
 
 const capabilityMap: Record<string, Descriptor> = {
   draft: { label: '草稿', tone: 'neutral', icon: <CircleDot {...ICON} />, hint: '尚未发布，外部不可见' },
+  // `POST /capabilities/{id}/validate` 通过后后端会把 draft 推进成 testing（capabilities.validate）；
+  // 缺这一项时列表与详情会直接显示英文 `testing`，与「四态徽标」的约定不一致。
+  testing: { label: '测试中', tone: 'info', icon: <CircleDot {...ICON} />, hint: '结构校验已通过，尚缺发布证据' },
   published: { label: '已发布', tone: 'ok', icon: <CircleCheck {...ICON} />, hint: '已有不可变版本，外部可见' },
   deprecated: { label: '已停用', tone: 'danger', icon: <CircleSlash {...ICON} />, hint: '不再参与路由，历史调用可查' },
   failing: { label: '连续失败', tone: 'warn', icon: <TriangleAlert {...ICON} />, hint: '最近测试未通过' },

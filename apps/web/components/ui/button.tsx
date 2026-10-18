@@ -1,6 +1,6 @@
 'use client';
 
-import { Slot } from '@radix-ui/react-slot';
+import { Slot, Slottable } from '@radix-ui/react-slot';
 import * as React from 'react';
 import { cn } from './cn';
 import { Spinner } from './spinner';
@@ -43,16 +43,34 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function 
 ) {
   const Comp = asChild ? Slot : 'button';
   const isDisabled = disabled || loading;
+  // asChild 分支：Radix Slot 1.5 只接受两种形态 ——
+  //   1) 恰好一个元素子节点；
+  //   2) 用 <Slottable> 包住原始子节点，再配一个兄弟节点（Spinner / icon）。
+  // 原来无条件写 `{loading ? <Spinner/> : icon}{children}`：asChild 下子节点是数组，
+  // React.Children.count 把缺失的 undefined 也算成一个，Slot 直接抛
+  // 「Slot failed to slot onto its children」，整页 client-side exception。
+  // **注意**：不能用 <>…</> 包起来再给 Slot —— Fragment 本身会被 React.Children.count
+  // 计为 1 且 isValidElement，Slot 会把 type/disabled 等 props 灌进 Fragment 并报
+  // 「Invalid prop `type` supplied to React.Fragment」。必须保持两个并列兄弟节点。
+  const decoration = loading ? <Spinner size={14} /> : icon;
+  const commonProps = {
+    ref,
+    className: cn(base, variants[variant], sizes[size], className),
+    'aria-busy': loading || undefined,
+    ...props,
+  } as const;
+
+  if (asChild) {
+    return (
+      <Comp {...commonProps}>
+        {decoration}
+        <Slottable>{children}</Slottable>
+      </Comp>
+    );
+  }
   return (
-    <Comp
-      ref={ref}
-      type={asChild ? undefined : (type ?? 'button')}
-      className={cn(base, variants[variant], sizes[size], className)}
-      aria-busy={loading || undefined}
-      disabled={asChild ? undefined : isDisabled}
-      {...props}
-    >
-      {loading ? <Spinner size={14} /> : icon}
+    <Comp {...commonProps} type={type ?? 'button'} disabled={isDisabled}>
+      {decoration}
       {children}
     </Comp>
   );

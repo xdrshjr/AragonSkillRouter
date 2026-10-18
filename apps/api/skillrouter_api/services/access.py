@@ -185,7 +185,10 @@ def create_token(agent_id: str, data: dict, *, actor: str | None = None) -> dict
         summary={"agent_id": agent_id, "scopes": scopes, "prefix": prefix},
         actor_id=actor,
     )
-    install_command = settings.install_command(full)
+    # 不要把真实令牌拼进命令串：`--token <srk_...>` 会留在 shell 历史与进程列表里
+    # （CLI 自己也会打一条同样的警告），与 README「令牌不出现在 argv 里」的承诺矛盾。
+    # 令牌本身已经在响应体的 `token` 字段里单独返回，命令统一走 stdin。
+    install_command = settings.install_command(token_stdin=True)
     return {
         "token_id": token_id,
         "token": full,

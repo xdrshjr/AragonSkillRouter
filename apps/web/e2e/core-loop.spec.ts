@@ -61,7 +61,16 @@ test.describe('核心闭环：配置 → 测试 → 发布 → 调用 → 记录
 
   test('任务页把 status_unknown 单独解释', async ({ page }) => {
     await page.goto('/tasks');
-    await expect(page.getByRole('region', { name: '待确认' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '任务' })).toBeVisible();
+    // 与数据无关的不变量：状态未知被列为独立状态，并明确「可能仍在远端执行」。
+    // （原用例断言 aria-label="待确认" 的区块常驻，但该区块只在当前页存在 status_unknown 任务时渲染，
+    //   没有异步任务时必然失败——属于用例假设与实现不符，不是功能缺陷。）
+    await expect(page.getByRole('button', { name: '状态未知', exact: true })).toBeVisible();
     await expect(page.getByText(/可能仍在远端执行/).first()).toBeVisible();
+    // 存在「状态未知」任务时必须出现独立提示区（不把它读成失败或成功）
+    const banner = page.getByRole('region', { name: '待确认任务' });
+    if (await banner.count()) {
+      await expect(banner).toBeVisible();
+    }
   });
 });

@@ -310,6 +310,9 @@ export interface CapabilityIssue {
   code: string;
   message: string;
   hint?: string | null;
+  /** 后端字段名（services/capabilities.py::_issue 返回 `level`） */
+  level?: 'error' | 'warn';
+  /** 兼容旧写法：早期前端类型用的是 `severity` */
   severity?: 'error' | 'warn';
 }
 
@@ -586,7 +589,18 @@ export interface CallDetail extends CallLog {
   route_decision: RouteDecisionRecord | null;
   retry_chain: JsonObject[];
   error_mapping: JsonObject | null;
-  timings: { queue_ms: number | null; upstream_ms: number | null; total_ms: number | null };
+  /**
+   * 后端 `GET /api/admin/calls/{request_id}` 返回的字段名是 `latency_breakdown`
+   * （services/calls.py 的 get_call），旧前端类型写成了 `timings`，
+   * 详情抽屉读 `timings.queue_ms` 会直接抛异常、整块白屏。两个名字都声明，页面做兜底。
+   */
+  latency_breakdown?: {
+    queue_ms: number | null;
+    upstream_ms: number | null;
+    total_ms: number | null;
+    platform_ms?: number | null;
+  } | null;
+  timings?: { queue_ms: number | null; upstream_ms: number | null; total_ms: number | null } | null;
 }
 
 export type TaskStatus =

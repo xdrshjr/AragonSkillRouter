@@ -1,7 +1,7 @@
 'use client';
 
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { CircleCheck, CircleX, LogOut } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import * as React from 'react';
@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input';
 import { isApiError } from '@/lib/api';
 import { changePassword, checkPasswordStrength, fetchMe, logout, passwordStrength } from '@/lib/auth';
 import { queryKeys } from '@/lib/query';
+import type { MeResponse } from '@/lib/types';
 
 const schema = z
   .object({
@@ -38,6 +39,7 @@ type FormValues = z.infer<typeof schema>;
  */
 export default function ChangePasswordPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [serverError, setServerError] = React.useState<{
     code: string;
     message: string;
@@ -69,6 +71,15 @@ export default function ChangePasswordPage() {
         current_password: values.current_password,
         new_password: values.new_password,
       });
+      // 先把会话缓存里的 must_change_password 置为 false，再跳转。
+      // 否则 (app) 布局会读到改密页缓存下来的 `/me`（staleTime 60s）并立刻把用户弹回本页，
+      // 表现成「改密成功后又被踢回改密页」的死循环。
+      queryClient.setQueryData<MeResponse | null>(queryKeys.auth.me(), (previous) =>
+        previous
+          ? { ...previous, admin: { ...previous.admin, must_change_password: false } }
+          : previous,
+      );
+      void queryClient.invalidateQueries({ queryKey: queryKeys.auth.me() });
       setDone(true);
       setTimeout(() => router.replace('/'), 1200);
     } catch (cause) {

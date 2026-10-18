@@ -33,6 +33,20 @@ export function FormField({
   className,
   aside,
 }: FormFieldProps) {
+  // `label htmlFor={id}` 只有在控件真的带 id 时才成立。Input/Textarea 由调用方手写 id，
+  // 但 Select（Radix Trigger）经常被漏掉，于是标签点了没反应、读屏与自动化都定位不到控件。
+  // 这里统一兜底：单个元素且没有 id 时补上 id 与 aria-describedby（已有则不动）。
+  const control = React.isValidElement(children)
+    ? (() => {
+        const props = children.props as { id?: string; 'aria-describedby'?: string };
+        if (props.id) return children;
+        return React.cloneElement(children as React.ReactElement<Record<string, unknown>>, {
+          id,
+          'aria-describedby': props['aria-describedby'] ?? `${id}-error`,
+        });
+      })()
+    : children;
+
   return (
     <div className={cn('flex flex-col gap-1.5', className)}>
       <div className="flex items-center justify-between gap-2">
@@ -46,7 +60,7 @@ export function FormField({
           {description}
         </p>
       ) : null}
-      {children}
+      {control}
       <p
         id={`${id}-error`}
         role={error ? 'alert' : undefined}

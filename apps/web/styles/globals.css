@@ -213,14 +213,20 @@
   }
 }
 
+/* 入场动效：只动 `translate` 长属性，**不要**写 `transform`。
+ * `.sr-enter` 被 DialogContent（`-translate-x-1/2 -translate-y-1/2` 居中）等组件复用，
+ * 而 animation 的 `both`（fill-mode: both）会把最终关键帧的 `transform` 一直保留在元素上，
+ * 直接覆盖 Tailwind 的 translate 工具类 —— 实测后果是对话框只把左上角放到了视口中心：
+ * 高度 617px 的「签发令牌」对话框下半截（含「签发」按钮）整块落在视口之外，点不到。
+ * `translate` 长属性与 `transform` 参与同一条变换链但不互相覆盖，两者可以共存。 */
 @keyframes sr-enter {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    translate: 0 4px;
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    translate: 0 0;
   }
 }
 

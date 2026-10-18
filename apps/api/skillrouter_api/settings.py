@@ -205,17 +205,17 @@ class Settings(BaseSettings):
     def gateway_pin_version(self) -> str:
         return self.engine_pin.split("@", 1)[0]
 
-    def install_command(self, token_placeholder: str = "<srk_...>") -> str:
+    def install_command(self, token_placeholder: str = "<srk_...>", *, token_stdin: bool = False) -> str:
+        """安装命令。`token_stdin=True` 时一律用 `--token-stdin`，避免令牌进 argv/历史。"""
         base = self.public_base_url
-        if self.install_mode == "npm":
-            return (
-                f"npx @skillrouter/cli@latest install --base-url {base} "
-                f"--token-stdin"
-            )
-        tarball = f"skillrouter-cli-{self.cli_package_version}.tgz"
-        return (
-            f"npx ./{tarball} install --base-url {base} --token {token_placeholder}"
+        package = (
+            "@skillrouter/cli@latest"
+            if self.install_mode == "npm"
+            else f"./skillrouter-cli-{self.cli_package_version}.tgz"
         )
+        if token_stdin or self.install_mode == "npm":
+            return f"npx {package} install --base-url {base} --token-stdin"
+        return f"npx {package} install --base-url {base} --token {token_placeholder}"
 
     def ensure_dirs(self) -> None:
         for p in (

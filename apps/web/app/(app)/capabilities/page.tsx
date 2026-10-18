@@ -32,6 +32,7 @@ export default function CapabilitiesPage() {
       value: table.filters['status'] ?? '',
       options: [
         { value: 'draft', label: '草稿' },
+        { value: 'testing', label: '测试中' },
         { value: 'published', label: '已发布' },
         { value: 'deprecated', label: '已停用' },
       ],

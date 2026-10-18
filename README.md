@@ -89,6 +89,19 @@ start http://localhost:3000/login
 POSIX 等价命令见 spec §14.1；用 GNU Make 或 PowerShell 时可直接 `make help` / `.\make.ps1 help`
 （目标：`install / dev / test / lint / typecheck / e2e / up / down / backup / restore / seed / perf`）。
 
+想用**一条命令**起上面四个进程（并合并成一路彩色日志）：
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
+```
+
+`start.ps1` 依次做：检查/安装依赖 → 首次生成 `.env`（随机网关密钥）→ 用**绝对路径**固定
+`SKILLROUTER_DATA_DIR` / `SKILLROUTER_DB_PATH` → 跑 `scripts/bootstrap.py` → 后台起
+gateway/api/worker/web 并逐个探测就绪 → 打开 `/login`。Ctrl+C 停全部；
+`-Action status | stop | restart | logs | check` 管理生命周期，
+`-Components api,web` 只起前后端，`-ApiPort/-GatewayPort/-WebPort/-Force/-NoBootstrap/-NoFollow`
+按需覆盖，日志落在 `var/logs/dev/<组件>.out.log`。
+
 容器部署：
 
 ```bat
@@ -133,7 +146,7 @@ docs/                        文档索引见 docs/README.md（deploy / api / ski
 |---|---|---|
 | `apps/api` 配置层（`settings.py`） | 已实现 | 与 spec §7.1 逐项对齐（含 `SKILLROUTER_EGRESS_POLICY` 别名）；`deploy/.env.example` 按它生成 |
 | `apps/api` 其余（main/路由/worker/executors/upgrade） | 待验证 | 交付时仍按 §8.2 清单推进；`pytest` 未见绿之前不标已实现 |
-| `apps/web` 控制台 | 已实现（构建层面） | owner 报告：`tsc` strict + eslint + `next build` 通过，21 条路由；**浏览器端到端未跑**（e2e 待验证） |
+| `apps/web` 控制台 | 已实现（构建层面） | owner 报告：`tsc` strict + eslint + `next build` 通过，21 条路由；第 3 轮补了**有头 Chrome 浏览器巡检**：13 条路由零控制台错误 + 11 条 e2e（9 通过 / 2 条需真实模型引擎，跳过），证据见 [runbook/verification-report.md](docs/runbook/verification-report.md) §10 |
 | `agents/aragon-gateway` | 已实现（自身测试层面） | owner 报告：typecheck 通过、42 条 vitest 绿、inline/host 两种模式可启动并报告引擎 0.2.34 / 12 个 `sr_*` 工具 |
 | `packages/skillrouter-cli` | 已实现（自身测试层面） | owner 报告：`tsc` 通过、37 条 vitest 绿、`install → verify → list → update → uninstall` 在临时目录跑通（假服务端） |
 | 外部 Agent 端到端（AragonAgent / Claude Code） | **待验证** | 需要真实 Agent 环境跑「安装 → 发现 → 调用」，见 checklist §A5 |
