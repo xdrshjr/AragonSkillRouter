@@ -52,6 +52,57 @@ jobs:
           echo "ci.yml 可被 YAML 解析 ✓"
           bash -n deploy/entrypoint.api.sh
           echo "entrypoint.api.sh 语法通过 ✓"
+      - name: ci.yml 上下文可用性（错用 runner/steps 会让整份文件被判非法：0 job + failure）
+        run: |
+          set -e
+          python - <<'PY'
+          import io, re, sys, yaml
+
+          # GitHub 的上下文可用性表：jobs.<id>.env 里没有 runner / steps / job / env。
+          # 写错一个（例如 ${{ runner.temp }}）不会只坏一个 job —— 整份 workflow 会
+          # 被判为 Invalid workflow file，表现为「run 显示 failure 但 0 个 job」，
+          # 排查成本极高（本项目踩过：ci.yml 连续 6 次 0 job）。
+          ALLOWED = {
+              'env_top': {'github', 'secrets', 'inputs', 'vars'},
+              'env_job': {'github', 'needs', 'strategy', 'matrix', 'vars', 'secrets', 'inputs'},
+              'env_step': {'github', 'needs', 'strategy', 'matrix', 'job', 'runner', 'env',
+                           'vars', 'secrets', 'steps', 'inputs'},
+              'if_job': {'github', 'needs', 'vars', 'inputs'},
+              'if_step': {'github', 'needs', 'strategy', 'matrix', 'job', 'runner', 'env',
+                          'vars', 'secrets', 'steps', 'inputs'},
+          }
+          EXPR = re.compile(r'\$\{\{(.*?)\}\}', re.S)
+          NAME = re.compile(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\.')
+
+          def ctx(text):
+              out = set()
+              for m in EXPR.finditer(text):
+                  body = re.sub(r"'[^']*'", "''", m.group(1))
+                  out |= set(NAME.findall(body))
+              return out
+
+          doc = yaml.safe_load(io.open('.github/workflows/ci.yml', encoding='utf-8'))
+          bad = []
+          for k, v in (doc.get('env') or {}).items():
+              bad += [(f'env[{k}]', ctx(str(v)) - ALLOWED['env_top'])]
+          for jid, job in (doc.get('jobs') or {}).items():
+              for k, v in (job.get('env') or {}).items():
+                  bad += [(f'{jid}.env[{k}]', ctx(str(v)) - ALLOWED['env_job'])]
+              if 'if' in job:
+                  bad += [(f'{jid}.if', ctx('${{' + str(job['if']) + '}}') - ALLOWED['if_job'])]
+              for i, step in enumerate(job.get('steps') or []):
+                  for k, v in (step.get('env') or {}).items():
+                      bad += [(f'{jid}.steps[{i}].env[{k}]', ctx(str(v)) - ALLOWED['env_step'])]
+                  if 'if' in step:
+                      bad += [(f'{jid}.steps[{i}].if',
+                               ctx('${{' + str(step['if']) + '}}') - ALLOWED['if_step'])]
+          bad = [(where, names) for where, names in bad if names]
+          for where, names in bad:
+              print(f'::error::ci.yml {where} 用了该位置不可用的上下文 {sorted(names)}')
+          if bad:
+              sys.exit(1)
+          print('ci.yml 上下文可用性 ✓')
+          PY
       - name: entrypoint 必须支持 run 角色（F-22）
         run: |
           set -e
@@ -161,13 +212,21 @@ jobs:
       run:
         working-directory: apps/api
     env:
+      # 注意：`runner` 上下文在 **job 级 env** 里不可用（只有 github / needs / strategy /
+      # matrix / vars / secrets / inputs）。写在这里会让整份 workflow 被判为非法：
+      #   Unrecognized named-value: 'runner' … Located at position 1 within expression: runner.temp
+      # 因此数据目录在第一步里用 shell 变量 $RUNNER_TEMP 算出来再写进 $GITHUB_ENV。
       SKILLROUTER_ENV: development
-      SKILLROUTER_DATA_DIR: ${{ runner.temp }}/sr-data
-      SKILLROUTER_DB_PATH: ${{ runner.temp }}/sr-data/mig.db
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.11', cache: pip }
+      - name: 准备临时数据目录（runner 上下文只在 step 级可用）
+        run: |
+          set -e
+          echo "SKILLROUTER_DATA_DIR=${RUNNER_TEMP}/sr-data" >> "$GITHUB_ENV"
+          echo "SKILLROUTER_DB_PATH=${RUNNER_TEMP}/sr-data/mig.db" >> "$GITHUB_ENV"
+          echo "data_dir=${RUNNER_TEMP}/sr-data"
       - run: pip install -r requirements-dev.txt
       - run: python -m alembic -c migrations/alembic.ini upgrade head
       - run: python -m alembic -c migrations/alembic.ini downgrade base
