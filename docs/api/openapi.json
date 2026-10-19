@@ -29,7 +29,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Materialize Internal Credentials Materialize Post"
                 }
@@ -62,7 +61,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Internal Capabilities Internal Capabilities Get"
                 }
@@ -97,7 +95,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Internal Capability Internal Capabilities  Key  Get"
                 }
               }
@@ -139,7 +136,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Internal Audit Internal Audit Post"
                 }
@@ -194,7 +190,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Tool Proxy Internal Tools  Tool Name  Post"
                 }
               }
@@ -256,7 +251,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Login Api Admin Auth Login Post"
                 }
@@ -289,7 +283,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Logout Api Admin Auth Logout Post"
                 }
@@ -312,7 +305,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Me Api Admin Auth Me Get"
                 }
@@ -345,7 +337,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Change Password Api Admin Auth Change Password Post"
                 }
@@ -378,7 +369,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Get Overview Api Admin Overview Get"
                 }
@@ -434,7 +424,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Search Api Admin Search Get"
                 }
               }
@@ -533,7 +522,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Providers Api Admin Providers Get"
                 }
               }
@@ -574,7 +562,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Create Provider Api Admin Providers Post"
                 }
               }
@@ -618,7 +605,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Provider Api Admin Providers  Provider Id  Get"
                 }
               }
@@ -670,7 +656,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Update Provider Api Admin Providers  Provider Id  Patch"
                 }
               }
@@ -722,7 +707,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Delete Provider Api Admin Providers  Provider Id  Delete"
                 }
               }
@@ -766,7 +750,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Provider Credentials Api Admin Providers  Provider Id  Credentials Get"
                 }
               }
@@ -818,7 +801,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Create Credential Api Admin Providers  Provider Id  Credentials Post"
                 }
               }
@@ -902,7 +884,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Credentials Api Admin Credentials Get"
                 }
               }
@@ -946,7 +927,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Credential Api Admin Credentials  Credential Id  Get"
                 }
               }
@@ -998,7 +978,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Update Credential Api Admin Credentials  Credential Id  Patch"
                 }
               }
@@ -1040,7 +1019,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Delete Credential Api Admin Credentials  Credential Id  Delete"
                 }
               }
@@ -1084,7 +1062,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Verify Credential Api Admin Credentials  Credential Id  Verify Post"
                 }
               }
@@ -1128,7 +1105,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Verification History Api Admin Credentials  Credential Id  Verifications Get"
                 }
               }
@@ -1172,7 +1148,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Disable Credential Api Admin Credentials  Credential Id  Disable Post"
                 }
               }
@@ -1216,7 +1191,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Enable Credential Api Admin Credentials  Credential Id  Enable Post"
                 }
               }
@@ -1270,7 +1244,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Replace Secret Api Admin Credentials  Credential Id  Replace Post"
                 }
               }
@@ -1324,7 +1297,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Rotate Credential Api Admin Credentials  Credential Id  Rotate Post"
                 }
               }
@@ -1368,7 +1340,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Credential Impact Api Admin Credentials  Credential Id  Impact Get"
                 }
               }
@@ -1467,7 +1438,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Capabilities Api Admin Capabilities Get"
                 }
               }
@@ -1508,7 +1478,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Create Capability Api Admin Capabilities Post"
                 }
               }
@@ -1552,7 +1521,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Capability Api Admin Capabilities  Capability Id  Get"
                 }
               }
@@ -1604,7 +1572,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Update Capability Api Admin Capabilities  Capability Id  Patch"
                 }
               }
@@ -1646,7 +1613,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Delete Capability Api Admin Capabilities  Capability Id  Delete"
                 }
               }
@@ -1690,7 +1656,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Validate Capability Api Admin Capabilities  Capability Id  Validate Post"
                 }
               }
@@ -1744,7 +1709,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Test Capability Api Admin Capabilities  Capability Id  Test Post"
                 }
               }
@@ -1798,7 +1762,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Publish Capability Api Admin Capabilities  Capability Id  Publish Post"
                 }
               }
@@ -1842,7 +1805,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Deprecate Capability Api Admin Capabilities  Capability Id  Deprecate Post"
                 }
               }
@@ -1886,7 +1848,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Versions Api Admin Capabilities  Capability Id  Versions Get"
                 }
               }
@@ -1939,7 +1900,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Version Detail Api Admin Capabilities  Capability Id  Versions  Version  Get"
                 }
               }
@@ -2001,7 +1961,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Diff Versions Api Admin Capabilities  Capability Id  Diff Get"
                 }
               }
@@ -2055,7 +2014,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Rollback Capability Api Admin Capabilities  Capability Id  Rollback Post"
                 }
               }
@@ -2109,7 +2067,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Confirm Compatibility Api Admin Capabilities  Capability Id  Compatibility Post"
                 }
               }
@@ -2153,7 +2110,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Capability Impact Api Admin Capabilities  Capability Id  Impact Get"
                 }
               }
@@ -2197,7 +2153,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Routes Api Admin Capabilities  Capability Id  Routes Get"
                 }
               }
@@ -2249,7 +2204,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Upsert Route Api Admin Capabilities  Capability Id  Routes Post"
                 }
               }
@@ -2312,7 +2266,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Patch Route Api Admin Capabilities  Capability Id  Routes  Route Id  Patch"
                 }
               }
@@ -2363,7 +2316,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Delete Route Api Admin Capabilities  Capability Id  Routes  Route Id  Delete"
                 }
               }
@@ -2446,7 +2398,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Skills Api Admin Skills Get"
                 }
               }
@@ -2487,7 +2438,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Create Skill Api Admin Skills Post"
                 }
               }
@@ -2529,7 +2479,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Import Preview Api Admin Skills Import Preview Post"
                 }
@@ -2572,7 +2521,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Import Commit Api Admin Skills Import Commit Post"
                 }
@@ -2617,7 +2565,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Skill Api Admin Skills  Skill Id  Get"
                 }
               }
@@ -2669,7 +2616,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Update Skill Api Admin Skills  Skill Id  Patch"
                 }
               }
@@ -2711,7 +2657,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Delete Skill Api Admin Skills  Skill Id  Delete"
                 }
               }
@@ -2765,7 +2710,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Test Skill Api Admin Skills  Skill Id  Test Post"
                 }
               }
@@ -2819,7 +2763,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Publish Skill Api Admin Skills  Skill Id  Publish Post"
                 }
               }
@@ -2863,7 +2806,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Deprecate Skill Api Admin Skills  Skill Id  Deprecate Post"
                 }
               }
@@ -2907,7 +2849,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Enable Skill Api Admin Skills  Skill Id  Enable Post"
                 }
               }
@@ -2951,7 +2892,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Disable Skill Api Admin Skills  Skill Id  Disable Post"
                 }
               }
@@ -2995,7 +2935,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Versions Api Admin Skills  Skill Id  Versions Get"
                 }
               }
@@ -3057,7 +2996,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Diff Api Admin Skills  Skill Id  Diff Get"
                 }
               }
@@ -3101,7 +3039,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Dependencies Api Admin Skills  Skill Id  Dependencies Get"
                 }
               }
@@ -3145,7 +3082,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Preview Api Admin Skills  Skill Id  Preview Get"
                 }
               }
@@ -3199,7 +3135,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Export Skill Api Admin Skills  Skill Id  Export Post"
                 }
               }
@@ -3231,7 +3166,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response List Agents Api Admin Access Agents Get"
                 }
@@ -3262,7 +3196,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Create Agent Api Admin Access Agents Post"
                 }
@@ -3307,7 +3240,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Agent Api Admin Access Agents  Agent Id  Get"
                 }
               }
@@ -3359,7 +3291,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Update Agent Api Admin Access Agents  Agent Id  Patch"
                 }
               }
@@ -3401,7 +3332,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Delete Agent Api Admin Access Agents  Agent Id  Delete"
                 }
               }
@@ -3455,7 +3385,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Create Token Api Admin Access Agents  Agent Id  Tokens Post"
                 }
               }
@@ -3506,7 +3435,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Tokens Api Admin Access Tokens Get"
                 }
               }
@@ -3550,7 +3478,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Revoke Token Api Admin Access Tokens  Token Id  Delete"
                 }
               }
@@ -3582,7 +3509,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Quotas Api Admin Access Quotas Get"
                 }
@@ -3636,7 +3562,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Set Quota Api Admin Access Quotas  Scope Type   Scope Id  Put"
                 }
               }
@@ -3836,7 +3761,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Calls Api Admin Calls Get"
                 }
               }
@@ -3880,7 +3804,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Call Api Admin Calls  Request Id  Get"
                 }
               }
@@ -3964,7 +3887,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Tasks Api Admin Tasks Get"
                 }
               }
@@ -4008,7 +3930,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Task Api Admin Tasks  Task Id  Get"
                 }
               }
@@ -4052,7 +3973,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Cancel Task Api Admin Tasks  Task Id  Cancel Post"
                 }
               }
@@ -4096,7 +4016,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Reconcile Task Api Admin Tasks  Task Id  Reconcile Post"
                 }
               }
@@ -4128,7 +4047,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response List Sessions Api Admin Agent Sessions Get"
                 }
@@ -4159,7 +4077,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Create Session Api Admin Agent Sessions Post"
                 }
@@ -4204,7 +4121,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Session Api Admin Agent Sessions  Session Id  Get"
                 }
               }
@@ -4258,7 +4174,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Send Message Api Admin Agent Sessions  Session Id  Messages Post"
                 }
               }
@@ -4352,7 +4267,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Stop Api Admin Agent Sessions  Session Id  Stop Post"
                 }
               }
@@ -4406,7 +4320,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Retry Api Admin Agent Sessions  Session Id  Retry Post"
                 }
               }
@@ -4450,7 +4363,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Archive Api Admin Agent Sessions  Session Id  Archive Post"
                 }
               }
@@ -4482,7 +4394,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Get Config Api Admin Agent Config Get"
                 }
@@ -4501,7 +4412,6 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
                 "type": "object",
                 "title": "Payload"
               }
@@ -4515,7 +4425,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Patch Config Api Admin Agent Config Patch"
                 }
@@ -4548,7 +4457,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Connectivity Api Admin Agent Connectivity Post"
                 }
@@ -4582,7 +4490,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Create Flow Api Admin Agent Flows Post"
                 }
               }
@@ -4631,7 +4538,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Flows Api Admin Agent Flows Get"
                 }
               }
@@ -4675,7 +4581,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Flow Api Admin Agent Flows  Flow Id  Get"
                 }
               }
@@ -4727,8 +4632,7 @@
               "schema": {
                 "anyOf": [
                   {
-                    "type": "object",
-                    "additionalProperties": true
+                    "type": "object"
                   },
                   {
                     "type": "null"
@@ -4746,7 +4650,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Run Step Api Admin Agent Flows  Flow Id  Steps  Step  Run Post"
                 }
               }
@@ -4789,8 +4692,7 @@
               "schema": {
                 "anyOf": [
                   {
-                    "type": "object",
-                    "additionalProperties": true
+                    "type": "object"
                   },
                   {
                     "type": "null"
@@ -4808,7 +4710,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Publish Flow Api Admin Agent Flows  Flow Id  Publish Post"
                 }
               }
@@ -4860,7 +4761,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Approvals Api Admin Agent Approvals Get"
                 }
               }
@@ -4914,7 +4814,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Decide Api Admin Agent Approvals  Approval Id  Decide Post"
                 }
               }
@@ -4946,7 +4845,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Status Api Admin Engine Status Get"
                 }
@@ -4969,7 +4867,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Candidates Api Admin Engine Candidates Get"
                 }
@@ -4992,7 +4889,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Check Api Admin Engine Check Post"
                 }
@@ -5025,7 +4921,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Upgrade Api Admin Engine Upgrade Post"
                 }
@@ -5058,7 +4953,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Runs Api Admin Engine Runs Get"
                 }
@@ -5093,7 +4987,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Run Detail Api Admin Engine Runs  Run Id  Get"
                 }
               }
@@ -5135,7 +5028,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Do Rollback Api Admin Engine Rollback Post"
                 }
@@ -5168,7 +5060,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Deployments Api Admin Engine Deployments Get"
                 }
@@ -5191,7 +5082,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Engine Capabilities Api Admin Engine Capabilities Get"
                 }
@@ -5214,7 +5104,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Get Settings Api Admin Settings Get"
                 }
@@ -5245,7 +5134,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Patch Settings Api Admin Settings Patch"
                 }
@@ -5278,7 +5166,6 @@
               "schema": {
                 "anyOf": [
                   {
-                    "additionalProperties": true,
                     "type": "object"
                   },
                   {
@@ -5296,7 +5183,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Rotate Api Admin Settings Rotate Master Key Post"
                 }
@@ -5341,7 +5227,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Rotate Status Api Admin Settings Rotate Master Key  Rotation Id  Get"
                 }
               }
@@ -5472,7 +5357,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response List Audit Api Admin Settings Audit Get"
                 }
               }
@@ -5504,7 +5388,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Audit Actions Api Admin Settings Audit Actions Get"
                 }
@@ -5527,7 +5410,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Trigger Backup Api Admin Settings Backup Post"
                 }
@@ -5551,7 +5433,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Backup Now Api Admin Settings Backup Now Post"
                 }
@@ -5574,7 +5455,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Egress Api Admin Settings Egress Get"
                 }
@@ -5608,7 +5488,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Upload File Api Admin Files Post"
                 }
@@ -5681,7 +5560,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Health Api V1 Health Get"
                 }
@@ -5704,7 +5582,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Me Api V1 Whoami Get"
                 }
@@ -5780,7 +5657,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Capability Api V1 Capabilities  Key  Get"
                 }
               }
@@ -5875,7 +5751,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Task Api V1 Tasks  Task Id  Get"
                 }
               }
@@ -5920,7 +5795,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Cancel Task Api V1 Tasks  Task Id  Cancel Post"
                 }
               }
@@ -5962,7 +5836,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Upload Api V1 Files Post"
                 }
@@ -6068,7 +5941,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response List Skills Api V1 Skills Get"
                 }
@@ -6103,7 +5975,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Get Skill Api V1 Skills  Name  Get"
                 }
               }
@@ -6224,7 +6095,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Callback Api V1 Callbacks  Provider Slug  Post"
                 }
               }
@@ -6256,7 +6126,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Healthz Healthz Get"
                 }
@@ -6300,7 +6169,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Api Health Api Health Get"
                 }
@@ -6479,7 +6347,6 @@
           "summary": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -6499,7 +6366,7 @@
         "properties": {
           "file": {
             "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "format": "binary",
             "title": "File"
           },
           "expires_in_days": {
@@ -6524,7 +6391,7 @@
         "properties": {
           "file": {
             "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "format": "binary",
             "title": "File"
           }
         },
@@ -6556,7 +6423,6 @@
           "definition": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -6588,7 +6454,6 @@
       "CapabilityTestRequest": {
         "properties": {
           "input": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Input"
           },
@@ -6675,7 +6540,6 @@
           "definition": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -6775,7 +6639,6 @@
             "title": "Secret"
           },
           "meta": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Meta"
           },
@@ -6873,7 +6736,6 @@
           "meta": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -6960,7 +6822,6 @@
             "default": false
           },
           "budget": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Budget"
           }
@@ -7151,7 +7012,6 @@
             "title": "Callback Url"
           },
           "extensions": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Extensions"
           }
@@ -7173,7 +7033,6 @@
             "title": "Capability Version"
           },
           "input": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Input"
           },
@@ -7662,7 +7521,6 @@
           "request": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7674,7 +7532,6 @@
           "param_map": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7686,7 +7543,6 @@
           "response_map": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7698,7 +7554,6 @@
           "stream": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7710,7 +7565,6 @@
           "async": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7722,7 +7576,6 @@
           "limits": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7757,7 +7610,6 @@
           "retry": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7801,7 +7653,6 @@
           "model_profile": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7813,7 +7664,6 @@
           "permission_profile": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7900,7 +7750,6 @@
           "agent_model": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -7974,7 +7823,6 @@
           },
           "dependencies": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -7991,12 +7839,10 @@
             "title": "Examples"
           },
           "permissions": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Permissions"
           },
           "execution_plan": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Execution Plan"
           },
@@ -8021,7 +7867,6 @@
       "SkillTestRequest": {
         "properties": {
           "input": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Input"
           },
@@ -8128,7 +7973,6 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
                   "type": "object"
                 },
                 "type": "array"
@@ -8165,7 +8009,6 @@
           "permissions": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -8177,7 +8020,6 @@
           "execution_plan": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -8329,7 +8171,6 @@
             "title": "Tool"
           },
           "arguments": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Arguments"
           },
@@ -8405,13 +8246,6 @@
           "type": {
             "type": "string",
             "title": "Error Type"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "ctx": {
-            "type": "object",
-            "title": "Context"
           }
         },
         "type": "object",

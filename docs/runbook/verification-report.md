@@ -607,6 +607,32 @@ CI 的命令是 `python -c "...print(json.dumps(...))" > docs/api/openapi.json`�
 > 生成的文件中文全变乱码（本轮踩了一次，diff 里 17 行 description 全花）。
 > 正确做法是用 Python 自己写文件：`io.open(p, "w", encoding="utf-8", newline="\n")`。
 
+#### 11.5.2 真正的坑：导出 OpenAPI **必须用 requirements 锁定的 fastapi/pydantic**
+
+补上结尾换行后 CI 仍然红（run #18）。继续查才发现根因更根本：
+
+| 环境 | fastapi | pydantic | 生成结果 |
+|---|---|---|---|
+| 本机全局 | 0.136.1 | 2.14.0 | 与仓库那份一致（但多了 170 行） |
+| `requirements.txt` 锁定 | **0.115.6** | **2.9.2** | CI 实际用来比对的那份 |
+
+两个版本生成的 OpenAPI 判若两份文件，差异**全部**是 schema 表述细节：
+`additionalProperties: true` 的有无、`contentMediaType` vs `format: binary`、
+`HTTPValidationError` 是否带 `input`/`ctx`。
+
+已核对：**路由与操作数完全一致**（117 paths / 139 operations，`missing` 与 `added` 两个集合都为空），
+所以这纯粹是依赖版本问题，不是接口变了。
+
+处置：
+1. 建一个按 `requirements-dev.txt` 装的 venv，用**它**导出 `docs/api/openapi.json`；
+2. 因为 `packages/contracts/src/api.d.ts` 是从该 JSON 生成的，同步 `npm run gen` 重新生成
+   （650 行变动，`gen:check` 与 `tsc -p tsconfig.json --noEmit` 均通过）；
+3. 在 CI 的报错分支里加了 `::notice::`，直接告诉下一个人「用锁定依赖导出」的确切命令，
+   并把 diff 前 60 行打出来（此前只打 `--stat`，看不出差异在哪）。
+
+> 结论：**OpenAPI / 契约这两个生成物只能在锁定依赖的环境里生成**，
+> 换一个 pydantic 版本重新导出会把这两个文件一起弄脏。
+
 ### 11.6 仍然待验证的（口径不变）
 
 真实第三方凭证、真实模型推理、真实外部 Agent / MCP 客户端、`docker compose up`、

@@ -151,7 +151,16 @@ jobs:
           if (cd apps/api && python -c "import json, skillrouter_api.main as m; print(json.dumps(m.create_app().openapi(), ensure_ascii=False, indent=2))") > docs/api/openapi.json 2>/tmp/openapi.err; then
             if [ -n "$(git status --porcelain docs/api/openapi.json)" ]; then
               echo "::error::docs/api/openapi.json 与实现不一致，请本地重新导出并提交"
+              # ⚠️ 重新导出**必须用 requirements.txt 锁定的 fastapi/pydantic**：
+              # OpenAPI 的输出随这两个库的版本变化（实测 fastapi 0.136/pydantic 2.14 与
+              # 锁定的 0.115.6/2.9.2 会差出 170 行，全是 additionalProperties 与
+              # contentMediaType 之类；路由与操作数完全一致）。用错版本的 venv 导出，
+              # 本地 gen:check 会通过、这里却永远红。
+              echo "::notice::请用锁定依赖导出：python -m venv .venv && .venv/bin/pip install -r apps/api/requirements-dev.txt"
+              echo "::notice::然后：cd apps/api && python -c \"import json, skillrouter_api.main as m; print(json.dumps(m.create_app().openapi(), ensure_ascii=False, indent=2))\" > ../../docs/api/openapi.json"
+              echo "::notice::再重新生成契约：cd packages/contracts && npm run gen"
               git --no-pager diff --stat docs/api/openapi.json || true
+              git --no-pager diff --unified=2 docs/api/openapi.json | head -n 60 || true
               exit 1
             fi
             echo "OpenAPI 无漂移 ✓"
