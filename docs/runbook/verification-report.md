@@ -527,3 +527,87 @@ cd apps/api && python -m alembic -c migrations/alembic.ini upgrade head
 
 > 这三个脚本用的都是真实进程与真实 HTTP（上游为本机 echo 服务），因此它们证明的是
 > **链路可用**，不证明**第三方上游可用** —— 后者仍按 §10.4 保持「待验证」。
+
+---
+
+## 11. 第 4 轮：把 CI 从「0 job 失败」修到全绿，并顺带挖出 2 个真实缺陷
+
+起点：本仓库首次推送到 GitHub 后，CI **每次都 failure 且 0 个 job**。本节记录根因链、
+修法、以及过程中被门禁挖出来的真实缺陷。口径不变：只有跑过的命令才写进这里。
+
+### 11.1 0 job 的两个原因（GitHub 一次只报一批）
+
+| # | 原因 | 表现 | 修法 |
+|---|---|---|---|
+| 1 | `jobs.<id>.env` 里用了 `${{ runner.temp }}`。该位置只允许 `github / needs / strategy / matrix / vars / secrets / inputs` | 整份 workflow 被判 `Invalid workflow file`：**run 显示 failure 但 0 个 job**（不是只坏一个 job） | 数据目录改在第一步用 `$RUNNER_TEMP` 算出来写进 `$GITHUB_ENV` |
+| 2 | 修 #1 时把守卫写成内联 python heredoc，脚本里出现字面量表达式定界符；GitHub 会对 `run:` 做表达式替换 | 仍然 0 job，报 `parser did not reach end of input after parsing the expression` | 守卫搬到 `scripts/check_workflow_contexts.py`，workflow 里只留一行调用 |
+
+> 排查方法教训：拆成单 job 能跑、整份不能跑 + 0 job，基本可以判定为「文件被判非法」而不是「job 挂」。
+> 靠 actionlint（`actionlint .github/workflows/ci.yml`）本地复现才是最快路径 —— 这次是它一次点出 #2。
+
+### 11.2 变绿过程中修掉的三个门禁问题
+
+| 作业 | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| `web` | `next build` 只在 Linux 失败：`Error occurred prerendering page "/404"` + `<Html> should not be imported outside of pages/_document` | workflow 级 `NODE_ENV=development`（为了 npm 装 devDependencies）让 `next build` 走 pages 的 **dev 运行时**去预渲染内置 `/404`、`/_error` | 只在 `next build` 这一步覆盖 `NODE_ENV=production`；另补 `app/not-found.tsx` / `app/global-error.tsx`，让构建不必回落到 Pages Router |
+| `contracts` | `api.d.ts` 与 `openapi.json` 不一致 | 生成物自 `259d62b` 后未再生成 | `npm run gen` 重新生成（7158 插入 / 428 删除），`gen:check` 通过 |
+| `scripts`/`api` | 同一份代码，ruff 有时 0 条、有时 121 条 | CI 用 `pip install ruff`（每次都拉最新）：0.15.20 报 0 条，0.17.1 报 43 条 | 钉死 `ruff==0.15.20`（ci.yml 两个作业 + `requirements-dev.txt`）；再 `--fix` 清 144 处 + 手修 12 处 |
+
+### 11.3 被门禁挖出的 2 个真实缺陷（不是类型标注问题）
+
+| # | 位置 | 缺陷 | 用户可见后果 |
+|---|---|---|---|
+| 1 | `services/execution.py::finalize_task_call` | 读 `task.error`，而 `Task` 模型没有该列 → `AttributeError` 在 `db_write()` 内抛出 | **整个事务回滚**：`call_logs.status` 永远停在 `queued`，`/calls` 一律显示「排队中」。被 `worker/runner.py` 的 `try/except` 吞成一条 warning，且此前无用例断言终态 |
+| 2 | `db/seed.py` + `worker/handlers/retention.py` | 我在 mypy 修复里做变量重命名时，循环体仍用旧变量名 | seed 会把上一个循环遗留的 `str` 写进 Setting；retention 会**删错行**（删上一轮已擦除的 CallLog，而不是过期的 IdempotencyKey）。两处都由 ruff `B007` 当场抓回 |
+
+> 缺陷 1 恰好是 §9.1 第 1 项想修的症状（异步记录永不成败）以另一种形式复发 —— 说明
+> 「修一次」不等于「锁死」，本轮补了 4 条回归（`tests/test_task_finalize_call_log.py`）。
+
+### 11.4 本轮新增的门禁与回归
+
+| 类型 | 文件 | 作用 |
+|---|---|---|
+| CI 守卫 | `scripts/check_workflow_contexts.py` | 按 GitHub 上下文可用性表检查 `env`/`if`/`with`/`run`；错用即 `::error::` 退出 1（防止再次 0 job 失败） |
+| CI 守卫 | `.github/workflows/ci.yml` 的 `ci.yml 上下文可用性` 步骤 | 上面那个脚本的调用点 |
+| 后端回归 | `apps/api/tests/test_task_finalize_call_log.py` | 4 条：成功→success、失败取 `result.error.code`、取消→failed+CANCELED、未终态不写死 |
+| 前端回归 | `apps/web/app/not-found.tsx`、`app/global-error.tsx` | App Router 的 404 / 全局错误页（此前缺失，构建只能回落 Pages Router） |
+
+### 11.5 本轮实测命令与结果
+
+```text
+cd apps/api && python -m pytest tests -q            -> 251 passed（247 原有 + 4 新增）
+cd apps/api && python -m mypy skillrouter_api       -> Success: no issues found in 136 source files
+cd apps/api && python -m ruff check .               -> All checks passed!
+<repo root>  && python -m ruff check scripts        -> All checks passed!
+cd apps/web  && npx tsc --noEmit                    -> 0 errors
+cd apps/web  && npx next lint                       -> No ESLint warnings or errors
+cd apps/web  && npm run build                       -> 成功（22 路由）
+python scripts/e2e_live.py                          -> 70/70 项通过
+python scripts/check_web.py                         -> 9/9 项通过
+python scripts/check_gateway.py                     -> 12/12 项通过
+packages/contracts: npm run gen:check                -> 与生成结果一致
+```
+
+### 11.5.1 OpenAPI 漂移检查的真实原因（补记）
+
+`api` 作业的「OpenAPI 导出并检查漂移」步骤此前从来没跑到过（每次都在 ruff / mypy 先失败），
+本轮第一次真正执行就红了。查下来**内容完全一致**，唯一差异是文件末尾换行：
+
+```diff
+-}                        <- 仓库里那份：没有结尾换行
+\ No newline at end of file
++}                        <- CI 用 print() 导出：必然多一个换行
+```
+
+CI 的命令是 `python -c "...print(json.dumps(...))" > docs/api/openapi.json`，
+`print()` 一定追加换行；而仓库里那份没有。于是这项检查**永远**认为有漂移。
+修法：按 CI 的确切输出重写（UTF-8 + 结尾换行），此后 `git diff` 为空。
+
+> 顺带记一个坑：在 cmd.exe 里用 `>` 重定向接 python 的 stdout，会把中文写成 **GBK**，
+> 生成的文件中文全变乱码（本轮踩了一次，diff 里 17 行 description 全花）。
+> 正确做法是用 Python 自己写文件：`io.open(p, "w", encoding="utf-8", newline="\n")`。
+
+### 11.6 仍然待验证的（口径不变）
+
+真实第三方凭证、真实模型推理、真实外部 Agent / MCP 客户端、`docker compose up`、
+目标硬件性能基线、真实候选版本升级 —— 与 §10.4 相同，本轮没有新增证据。
