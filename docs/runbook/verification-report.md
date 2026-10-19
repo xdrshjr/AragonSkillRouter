@@ -633,7 +633,31 @@ CI 的命令是 `python -c "...print(json.dumps(...))" > docs/api/openapi.json`�
 > 结论：**OpenAPI / 契约这两个生成物只能在锁定依赖的环境里生成**，
 > 换一个 pydantic 版本重新导出会把这两个文件一起弄脏。
 
-### 11.6 仍然待验证的（口径不变）
+### 11.6 CI 转绿（run #19，commit `d2c329d`）
+
+```text
+9 passed / 0 failed / 1 skipped（e2e (optional) 按设计跳过）
+conclusion: success
+https://github.com/xdrshjr/AragonSkillRouter/actions/runs/39190593842
+```
+
+| 作业 | 结果 | 说明 |
+|---|---|---|
+| `scripts (py3.11)` | ✅ | 含新增的「ci.yml 上下文可用性」守卫 |
+| `api (py3.11)` | ✅ | ruff + mypy + pytest + OpenAPI 漂移，四项全过 |
+| `migrations (py3.11)` | ✅ | upgrade → downgrade → upgrade → 再 upgrade（幂等） |
+| `gateway (node22)` | ✅ | tsc + vitest |
+| `cli (node22)` | ✅ | tsc + vitest |
+| `web (node22)` | ✅ | eslint + tsc + next build |
+| `contracts diff` | ✅ | 生成物无 diff |
+| `deploy config` | ✅ | compose / nginx / entrypoint 校验 |
+| `e2e skipped (not verified)` | ✅ | 显式告警「跳过 ≠ 通过」 |
+| `e2e (optional)` | ⏭ | 需要仓库变量 `E2E_ENABLED=1` 与已起好的 api |
+
+> 口径不变：`e2e` 那一条是**按设计跳过**，不计入 passed。真实模型推理、真实第三方凭证、
+> 真实外部 Agent / MCP 客户端、`docker compose up`、目标硬件性能基线仍为**待验证**。
+
+### 11.7 仍然待验证的（口径不变）
 
 真实第三方凭证、真实模型推理、真实外部 Agent / MCP 客户端、`docker compose up`、
 目标硬件性能基线、真实候选版本升级 —— 与 §10.4 相同，本轮没有新增证据。

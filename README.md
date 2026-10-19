@@ -13,7 +13,8 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=next.js&logoColor=white)](apps/web/package.json)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](apps/api/requirements.txt)
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](db/)
-[![tests](https://img.shields.io/badge/tests-341%20passed-brightgreen)](#质量与证据)
+[![tests](https://img.shields.io/badge/tests-345%20passed-brightgreen)](#质量与证据)
+[![ci](https://github.com/xdrshjr/AragonSkillRouter/actions/workflows/ci.yml/badge.svg)](https://github.com/xdrshjr/AragonSkillRouter/actions/workflows/ci.yml)
 [![API](https://img.shields.io/badge/OpenAPI-117%20paths-85EA2D?logo=openapiinitiative&logoColor=black)](docs/api/openapi.json)
 [![license](https://img.shields.io/badge/license-proprietary-red)](packages/skillrouter-cli/package.json)
 
@@ -308,9 +309,13 @@ curl -sS -X POST "$SR_BASE/api/v1/capabilities/text.generate.echo/invoke" \
 
 ### 本轮实测（可复现，命令即证据）
 
+> CI（`.github/workflows/ci.yml`）在 GitHub Actions 上 **9 作业全绿**：
+> scripts / api（ruff + mypy + pytest + OpenAPI 漂移）/ migrations / gateway / cli /
+> web / contracts / deploy / e2e-skipped。仅 `e2e (optional)` 按设计跳过。
+
 | 套件 | 命令 | 结果 |
 |---|---|---|
-| 后端全量 | `cd apps/api && python -m pytest tests -q` | **247 passed**（27 个文件） |
+| 后端全量 | `cd apps/api && python -m pytest tests -q` | **251 passed**（28 个文件） |
 | Agent 网关 | `cd agents/aragon-gateway && npx vitest run` | **48 passed**（4 个文件） |
 | npm CLI | `cd packages/skillrouter-cli && npx vitest run` | **37 passed**（3 个文件） |
 | 浏览器 e2e（有头 Chrome） | `cd apps/web && npx playwright test --headed` | **9 passed / 2 skipped**（2 条需真实模型引擎） |
@@ -320,7 +325,8 @@ curl -sS -X POST "$SR_BASE/api/v1/capabilities/text.generate.echo/invoke" \
 | 前端联通 | `python scripts/check_web.py` | **9/9**（Next 反代、X-Request-Id、未登录 401） |
 | 迁移 | `python -m alembic -c migrations/alembic.ini upgrade head` | 49 表 / 56 索引 / 2 触发器，`user_version=2` |
 
-合计 **341 项测试通过**（247 + 48 + 37 + 9），2 项按设计跳过。
+合计 **345 项测试通过**（251 + 48 + 37 + 9），2 项按设计跳过。
+GitHub Actions 上 9 个作业全绿（`e2e (optional)` 按设计跳过，不计入通过）。
 完整命令与输出归档在 [`docs/runbook/verification-report.md`](docs/runbook/verification-report.md)，
 逐项验收状态以 [`verification-checklist.md`](docs/runbook/verification-checklist.md) 为**唯一权威**。
 
