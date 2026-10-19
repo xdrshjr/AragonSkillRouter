@@ -93,9 +93,9 @@ def list_logs(
         items = [
             i
             for i in items
-            if needle in (i["action"] or "").lower()
+            if needle in str(i["action"] or "").lower()
             or needle in str(i["summary"]).lower()
-            or needle in (i["object_id"] or "").lower()
+            or needle in str(i["object_id"] or "").lower()
         ]
     return paginate(items, page, page_size)
 

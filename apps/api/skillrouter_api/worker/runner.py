@@ -8,7 +8,8 @@ import os
 import signal
 import socket
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any, cast
 
 from sqlalchemy import select
 
@@ -119,7 +120,10 @@ class Worker:
             )
             return
         timeout = DEFAULT_TIMEOUT_S.get(row.kind, 600)
-        handler_task = asyncio.create_task(handler(row.payload or {}))
+        # Handler 声明为 Awaitable[Any]，而 create_task 只接受 Coroutine —— cast 收窄
+        handler_task = asyncio.create_task(
+            cast(Coroutine[Any, Any, Any], handler(row.payload or {}))
+        )
         lease_task = asyncio.create_task(self._renew_loop(queue_id, handler_task))
         try:
             result = await asyncio.wait_for(handler_task, timeout=timeout)

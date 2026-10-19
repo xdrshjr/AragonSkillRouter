@@ -83,12 +83,12 @@ async def handle(payload: dict) -> dict:
             row.response_preview = None
             scrubbed += 1
         # 占位行长期停在 in_flight 会让同一幂等键永久 409（I3）：过期的直接清掉
-        for row in s.scalars(
+        for stale_key in s.scalars(
             select(IdempotencyKey).where(
                 IdempotencyKey.state == "in_flight", IdempotencyKey.expires_at < inflight_cutoff
             )
         ):
-            s.delete(row)
+            s.delete(stale_key)
             idem_cleared += 1
     sweep = files.retention_sweep()
     events = broker.cleanup()

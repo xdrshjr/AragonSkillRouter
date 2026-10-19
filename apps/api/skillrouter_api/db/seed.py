@@ -76,10 +76,10 @@ def seed_system_state(session: Session) -> None:
     for key, value in DEFAULT_STATE.items():
         if session.get(SystemState, key) is None:
             session.add(SystemState(key=key, value=value, updated_at=now_iso()))
-    for key, value in DEFAULT_SETTINGS.items():
+    for key, setting_value in DEFAULT_SETTINGS.items():
         if session.get(Setting, key) is None:
             session.add(
-                Setting(key=key, value=value, scope="global", updated_at=now_iso())
+                Setting(key=key, value=setting_value, scope="global", updated_at=now_iso())
             )
     existing = {
         row.capability_key for row in session.scalars(select(EngineCapabilityStatus)).all()

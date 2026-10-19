@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sized
 from pathlib import Path
+from typing import cast
 
 from ..logging import get_logger, redact
 from ..settings import settings
@@ -131,7 +133,7 @@ def check(candidate: dict, *, directory: Path | None = None, sample_limit: int =
         **base,
         "status": "passed",
         "detail": (
-            f"采样 {len(sample)}/{total} 个会话：顶层键集合一致（{len(shape_rows[0]['keys'])} 个键），"
+            f"采样 {len(sample)}/{total} 个会话：顶层键集合一致（{len(cast(Sized, shape_rows[0]['keys']))} 个键），"
             f"schemaVersion={schema_version}"
             + (f"；{unreadable} 个文件不可解析" if unreadable else "")
         ),

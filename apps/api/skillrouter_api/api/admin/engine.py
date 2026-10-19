@@ -46,7 +46,7 @@ async def status(ctx: SessionContext = Depends(require_password_changed)) -> dic
         )
         running = s.scalar(select(EngineUpgradeRun).where(EngineUpgradeRun.result.is_(None)))
         latest = s.scalar(select(EngineUpgradeRun).order_by(EngineUpgradeRun.started_at.desc()))
-        last_checked = get_state(s, "engine_last_check", None)
+        last_checked = get_state(s, "engine_last_check", "") or None
     return {
         **detect.settings_note(),
         "engine": engine,

@@ -42,18 +42,22 @@ def list_providers(
 ) -> dict:
     with db_session() as s:
         rows = list(s.scalars(select(Provider).where(Provider.deleted_at.is_(None))))
-        cred_counts = dict(
-            s.execute(
-                select(Credential.provider_id, func.count())
-                .where(Credential.deleted_at.is_(None))
-                .group_by(Credential.provider_id)
-            ).all()
-        )
-        route_counts = dict(
-            s.execute(
-                select(CapabilityRoute.provider_id, func.count()).group_by(CapabilityRoute.provider_id)
-            ).all()
-        )
+        # 用显式循环而不是 dict(row 序列)：SQLAlchemy 的 Row 在 mypy 眼里是
+        # Sequence[Row[tuple[str, int]]]，`dict(...)` 推不出元素类型，
+        # 会同时报 var-annotated 与 dict() 的 arg-type。
+        cred_counts: dict[str, int] = {}
+        for provider_id, count in s.execute(
+            select(Credential.provider_id, func.count())
+            .where(Credential.deleted_at.is_(None))
+            .group_by(Credential.provider_id)
+        ).all():
+            cred_counts[provider_id] = count
+
+        route_counts: dict[str, int] = {}
+        for provider_id, count in s.execute(
+            select(CapabilityRoute.provider_id, func.count()).group_by(CapabilityRoute.provider_id)
+        ).all():
+            route_counts[provider_id] = count
         active_creds = {
             row.provider_id
             for row in s.scalars(

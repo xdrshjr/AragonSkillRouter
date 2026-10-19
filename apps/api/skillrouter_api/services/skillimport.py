@@ -11,6 +11,7 @@ from pathlib import PurePosixPath
 
 import yaml
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ..db import db_session, db_write, now_iso, uuid_pk
 from ..errors import ApiError, Code
@@ -21,6 +22,18 @@ from ..security.instruction_scanner import scan
 from ..settings import settings
 from . import audit
 from . import skills as skill_service
+
+
+def _require_skill(session: Session, skill_id: str) -> Skill:
+    """按 id 取 Skill 并收敛 `None`。
+
+    这两处调用点都是「刚创建」或「已确认存在」之后立刻回写，拿不到就说明数据被并发删除，
+    属于异常路径；显式抛错比让 mypy 认为后面是 `Skill | None` 更有意义。
+    """
+    row = session.get(Skill, skill_id)
+    if row is None:  # pragma: no cover - 正常路径不会走到
+        raise ApiError(Code.NOT_FOUND, "SKILL 不存在")
+    return row
 
 log = get_logger("skillrouter.run")
 
@@ -313,7 +326,7 @@ def commit(payload: dict, *, actor: str | None = None) -> dict:
     if existing:
         skill_id = existing.id
         with db_write() as s:
-            row = s.get(Skill, skill_id)
+            row = _require_skill(s, skill_id)
             definition = dict(row.draft_definition or {})
             definition["instructions"] = stashed["body"]
             definition["frontmatter"] = stashed["frontmatter"]
@@ -334,7 +347,7 @@ def commit(payload: dict, *, actor: str | None = None) -> dict:
         )
         skill_id = created["id"]
         with db_write() as s:
-            row = s.get(Skill, skill_id)
+            row = _require_skill(s, skill_id)
             definition = dict(row.draft_definition or {})
             definition["frontmatter"] = stashed["frontmatter"]
             definition["source_files"] = stashed["files"]

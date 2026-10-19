@@ -178,6 +178,8 @@ def credential_status_map(definition: dict) -> dict[str, str]:
     out: dict[str, str] = {}
     with db_session() as s:
         for cid in ids:
+            if not cid:
+                continue
             row = s.get(Credential, cid)
             out[cid] = row.status if row else "missing"
     return out

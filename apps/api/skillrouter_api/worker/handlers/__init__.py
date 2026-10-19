@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from . import (
     agent_turn,
@@ -26,7 +27,9 @@ DEFAULT_TIMEOUT_S = {
     "backup": 1800,
 }
 
-Handler = Callable[[dict], Awaitable[None]]
+# 部分 handler 会返回结果字典（capability_invoke / retention_sweep 等），
+# 因此返回值统一为 Awaitable[Any]；调用方按需忽略。
+Handler = Callable[[dict], Awaitable[Any]]
 
 
 def registry() -> dict[str, Handler]:

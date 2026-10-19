@@ -120,11 +120,15 @@ async def handle(payload: dict) -> dict:
     deadline = async_poll.deadline(poll_conf)
     attempt = 0
     while True:
-        current = tasks.get(task_id)
-        if current["status"] in ("canceled", "canceling"):
-            if current["status"] == "canceling":
+        current_task = tasks.get(task_id)
+        if current_task["status"] in ("canceled", "canceling"):
+            if current_task["status"] == "canceling":
                 canceled = await _cancel_upstream(
-                    route, material, base_url, current["upstream_task_id"] or "", task_id=task_id
+                    route,
+                    material,
+                    base_url,
+                    current_task["upstream_task_id"] or "",
+                    task_id=task_id,
                 )
                 tasks.mark_canceled(task_id, upstream_ok=canceled)
             # 两条路径都是终态：必须收口记账/并发/调用记录，否则名额与「排队中」永久悬挂
@@ -136,7 +140,7 @@ async def handle(payload: dict) -> dict:
                 route=route,
                 material=material,
                 base_url=base_url,
-                upstream_task_id=current["upstream_task_id"] or "",
+                upstream_task_id=current_task["upstream_task_id"] or "",
             )
         except ApiError as exc:
             tasks.finish(task_id, status="status_unknown", error={"code": exc.code, "message": exc.message})

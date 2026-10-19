@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import desc, select
 
 from ..db import db_session
@@ -59,10 +61,7 @@ def _sort_items(items: list[dict], sort: str | None) -> list[dict]:
         keys.append((SORT_FIELDS[field], token.startswith("-")))
     ordered = list(items)
     for key, descending in reversed(keys):
-        ordered.sort(
-            key=lambda i, k=key: ((i.get(k) is None), i.get(k) if i.get(k) is not None else ""),
-            reverse=descending,
-        )
+        ordered.sort(key=_null_last_key(key), reverse=descending)
     return ordered
 
 
@@ -112,6 +111,20 @@ def list_calls(
         ]
     items = _sort_items(items, sort)
     return paginate(items, page, page_size)
+
+
+def _null_last_key(key: str):
+    """排序键：空值永远排在最后，其余按原值比较。
+
+    用具名函数而不是带默认参数的 lambda —— mypy 推不出 lambda 的返回类型会报
+    "Cannot infer type of lambda"。
+    """
+
+    def sort_key(item: dict[str, Any]) -> tuple[bool, Any]:
+        value = item.get(key)
+        return (value is None, value if value is not None else "")
+
+    return sort_key
 
 
 def get_call(request_id: str) -> dict:

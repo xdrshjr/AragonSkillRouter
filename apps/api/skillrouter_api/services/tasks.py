@@ -24,7 +24,7 @@ CANCEL_REQUEUE_FIELD = "cancel_requeues"
 #: `sort` 白名单（§A.3.11 `GET /api/admin/tasks`）
 SORT_FIELDS = ("created_at", "updated_at", "status")
 
-ALLOWED = {
+ALLOWED: dict[str, set[str]] = {
     # `queued → canceling`：提交前取消的唯一合法路径（§A.3.6，缺它会抛 INVALID_STATE_TRANSITION）
     "queued": {"running", "canceling", "canceled", "failed"},
     "running": {"succeeded", "failed", "canceling", "canceled", "status_unknown"},
@@ -74,7 +74,8 @@ def enqueue(kind: str, payload: dict, *, priority: int = 0, delay_s: int = 0, ma
 def transition(task: Task, target: str) -> None:
     if target == task.status:
         return
-    if target not in ALLOWED.get(task.status, set()):
+    allowed = ALLOWED.get(task.status) or set()
+    if target not in allowed:
         raise ApiError(
             Code.INVALID_STATE_TRANSITION,
             message=f"任务状态不能从 {task.status} 迁移到 {target}",

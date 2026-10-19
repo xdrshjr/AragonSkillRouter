@@ -627,11 +627,13 @@ def dependencies_of(skill_id: str) -> dict:
 
 
 def build_bundle(skill_id: str, fmt: str = "zip") -> tuple[bytes, str, str]:
-    data = get_skill(skill_id)
+    data = get_skill(skill_id)  # 不存在会先抛 NOT_FOUND
     with db_session() as s:
         row = s.get(Skill, skill_id)
-        version = s.get(SkillVersion, row.published_version_id) if row and row.published_version_id else None
-        skill_md = render_skill_md(row, version) if row else ""
+        if row is None:  # pragma: no cover - get_skill 已保证存在；防御并发删除
+            raise ApiError(Code.NOT_FOUND, "SKILL 不存在")
+        version = s.get(SkillVersion, row.published_version_id) if row.published_version_id else None
+        skill_md = render_skill_md(row, version)
     if fmt == "skill_md":
         return skill_md.encode(), "SKILL.md", "text/markdown"
     files_map: dict[str, bytes] = {

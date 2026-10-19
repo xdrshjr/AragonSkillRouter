@@ -92,8 +92,10 @@ class Broker:
             for row in s.scalars(select(SseEvent).where(SseEvent.at < cutoff)):
                 s.delete(row)
                 removed += 1
-            for row in s.scalars(select(AgentEventRow).where(AgentEventRow.at < cutoff)):
-                s.delete(row)
+            for agent_row in s.scalars(
+                select(AgentEventRow).where(AgentEventRow.at < cutoff)
+            ):
+                s.delete(agent_row)
                 removed += 1
         return {"removed": removed}
 

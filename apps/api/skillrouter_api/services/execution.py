@@ -263,22 +263,32 @@ def _idempotency_reserve(
     )
 
 
-def _quota_gate(*, token_ctx: TokenContext | None, definition: dict, provider_id: str | None) -> list[dict]:
+def _quota_gate(
+    *, token_ctx: TokenContext | None, definition: dict, provider_id: str | None
+) -> list[dict[str, Any]]:
     """令牌 → Agent → 能力 → 提供商 → 全局，任意一层超限即拒绝（§A.3.4-2）。
 
     逐层计数是「先加后判」：某一层拒绝时必须把已计入的并发名额退回，
     否则反复被拒的调用会把令牌/提供商的并发额度永久吃光（§7.10）。
     """
-    scopes: list[dict] = []
+    scopes: list[dict[str, Any]] = []
     try:
         if token_ctx is not None:
-            entry = {"scope_type": "token", "scope_id": token_ctx.token_id,
-                     "rpm": token_ctx.rpm, "concurrency": token_ctx.concurrency, "daily_calls": token_ctx.daily_calls}
+            entry: dict[str, Any] = {
+                "scope_type": "token",
+                "scope_id": token_ctx.token_id,
+                "rpm": token_ctx.rpm,
+                "concurrency": token_ctx.concurrency,
+                "daily_calls": token_ctx.daily_calls,
+            }
             check_and_count(**entry)
             scopes.append(entry)
             check_budget(scope_type="token", scope_id=token_ctx.token_id, max_cost_usd=token_ctx.budget_usd)
             if token_ctx.agent_id:
-                agent_entry = {"scope_type": "agent", "scope_id": token_ctx.agent_id}
+                agent_entry: dict[str, Any] = {
+                    "scope_type": "agent",
+                    "scope_id": token_ctx.agent_id,
+                }
                 check_and_count(**agent_entry)
                 scopes.append(agent_entry)
                 check_budget(scope_type="agent", scope_id=token_ctx.agent_id, max_cost_usd=None)
@@ -297,7 +307,7 @@ def _quota_gate(*, token_ctx: TokenContext | None, definition: dict, provider_id
     return scopes
 
 
-def _release(scopes: list[dict]) -> int:
+def _release(scopes: list[dict[str, Any]]) -> int:
     """逐层归还并发名额（幂等）；返回实际归还的层数。"""
     released = 0
     for entry in scopes:

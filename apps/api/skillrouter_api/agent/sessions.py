@@ -51,7 +51,7 @@ def list_sessions(*, q: str | None = None, page: int = 1, page_size: int = 20) -
         ]
     if q:
         needle = q.lower()
-        items = [i for i in items if needle in i["title"].lower()]
+        items = [i for i in items if needle in str(i["title"] or "").lower()]
     return paginate(items, page, page_size)
 
 

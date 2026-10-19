@@ -6,7 +6,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import HashingError, VerificationError, VerifyMismatchError
 
 try:  # argon2-cffi 23.1 用 InvalidHash，21.x 用 InvalidHashError
-    from argon2.exceptions import InvalidHashError as _InvalidHash
+    from argon2.exceptions import InvalidHashError as _InvalidHash  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - 依赖版本差异
     from argon2.exceptions import InvalidHash as _InvalidHash  # type: ignore[assignment]
 

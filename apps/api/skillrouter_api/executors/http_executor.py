@@ -87,7 +87,7 @@ def build_request(
             if name and source and "." in source:
                 ns, _, path = source.partition(".")
                 container = {"input": input_payload, "route": route, "options": options}.get(ns, {})
-                value = container
+                value: Any = container
                 for part in path.split("."):
                     value = value.get(part) if isinstance(value, dict) else None
                 if value is not None:

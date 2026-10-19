@@ -1235,9 +1235,14 @@ def describe(key: str) -> dict:
         )
         if row is None:
             raise ApiError(Code.NOT_FOUND, "能力不存在")
+        published = (
+            s.get(CapabilityVersion, row.published_version_id)
+            if row.published_version_id
+            else None
+        )
         definition = (
-            copy.deepcopy(s.get(CapabilityVersion, row.published_version_id).definition)
-            if row.published_version_id and s.get(CapabilityVersion, row.published_version_id)
+            copy.deepcopy(published.definition)
+            if published is not None
             else copy.deepcopy(row.draft_definition or {})
         )
         version = row.latest_version
