@@ -123,7 +123,6 @@ def test_import_preview_rejects_missing_skill_md(client, admin) -> None:
 
 
 def test_import_preview_path_traversal(client, admin) -> None:
-    data = _zip({"SKILL.md": SKILL_MD, "../evil.sh": "rm -rf /"})
     # 用 admin 上传通道（管理端文件上传走 v1，需要令牌；这里直接调预览 API 传 text）
     r = client.post(
         "/api/admin/skills/import/preview",

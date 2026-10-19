@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from ... import __version__
 from ...db import db_write, now_iso
 from ...db.seed import get_state
-from ...deps import get_db, require_admin, require_initialized, mark_initialized
+from ...deps import mark_initialized, require_admin, require_initialized
 from ...errors import ApiError, Code
 from ...logging import get_logger
 from ...models import AdminUser, SystemState

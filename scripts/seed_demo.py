@@ -32,7 +32,7 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 MOCK_PREFIX = "[MOCK]"
@@ -71,7 +71,7 @@ def log(message: str = "") -> None:
 
 
 def iso_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def resolve_data_dir(raw: str | None) -> Path:

@@ -39,12 +39,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 ROTATE_PATH = "/api/admin/settings/rotate-master-key"
 TERMINAL = {"succeeded", "success", "failed", "canceled", "canceled_local"}
 STEPS = (
-    """
+    f"""
 主密钥轮换步骤（§7.4 / §14.3）：
   1) 生成新密钥（32 字节 base64）：
      python -c "import base64,secrets;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
@@ -52,11 +52,11 @@ STEPS = (
      SKILLROUTER_MASTER_KEY=<新密钥>
      SKILLROUTER_MASTER_KEY_PREVIOUS=<旧密钥>     # 轮换期间双读
      SKILLROUTER_MASTER_KEY_ID=mk2                # 新标识，随密文保存
-  3) 触发轮换（本脚本）：POST %s
+  3) 触发轮换（本脚本）：POST {ROTATE_PATH}
   4) 等待 master_key_rotations.status=succeeded，并抽查：1 个凭证可解密 + 1 个能力可调用
   5) 确认无误后移除 SKILLROUTER_MASTER_KEY_PREVIOUS 并再次重启（双读窗口关闭）
 """
-    % ROTATE_PATH
+    
 )
 
 
@@ -80,7 +80,7 @@ def log(message: str = "") -> None:
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%H:%M:%SZ")
 
 
 def http_json(

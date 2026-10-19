@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 
 from ...deps import require_password_changed
 from ...security.sessions import SessionContext
@@ -22,7 +23,9 @@ async def get_overview(ctx: SessionContext = Depends(require_password_changed)) 
 
 
 @router.get("/events")
-async def events(request: Request, ctx: SessionContext = Depends(require_password_changed)):
+async def events(
+    request: Request, ctx: SessionContext = Depends(require_password_changed)
+) -> StreamingResponse:
     last_event_id = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id")
 
     async def generator():
@@ -35,7 +38,7 @@ async def events(request: Request, ctx: SessionContext = Depends(require_passwor
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": keep-alive\n\n"
                     continue
                 yield f"id: {event['id']}\nevent: {event['type']}\ndata: {json.dumps(event['payload'], ensure_ascii=False)}\n\n"

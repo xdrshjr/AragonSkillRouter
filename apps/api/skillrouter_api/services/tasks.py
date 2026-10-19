@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import desc, select
 
@@ -38,7 +38,7 @@ ALLOWED = {
 
 def _iso_offset(seconds: int) -> str:
     return (
-        datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        datetime.now(UTC) + timedelta(seconds=seconds)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -52,7 +52,7 @@ def _result_with(row: Task, **updates: object) -> dict:
 def enqueue(kind: str, payload: dict, *, priority: int = 0, delay_s: int = 0, max_attempts: int = 3) -> str:
     queue_id = uuid_pk("tq")
     available = (
-        datetime.now(timezone.utc) + timedelta(seconds=delay_s)
+        datetime.now(UTC) + timedelta(seconds=delay_s)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     with db_write() as s:
         s.add(
@@ -545,7 +545,7 @@ def queue_depth() -> int:
 
 def recent_failures(hours: int = 24) -> list[dict]:
     since = (
-        datetime.now(timezone.utc) - timedelta(hours=hours)
+        datetime.now(UTC) - timedelta(hours=hours)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     with db_session() as s:
         rows = list(

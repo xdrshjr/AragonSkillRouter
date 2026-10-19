@@ -17,7 +17,6 @@ from __future__ import annotations
 import http.cookiejar
 import json
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -157,7 +156,9 @@ def wait_for(url: str, timeout_s: int = 90) -> bool:
     return False
 
 
-def http_raw(method: str, url: str, *, headers: dict | None = None, data: bytes | None = None):
+def http_raw(
+    method: str, url: str, *, headers: dict | None = None, data: bytes | None = None
+) -> tuple[int, object, dict]:
     """不做 JSON 编解码的请求，返回 (status, body_text_or_json, headers)。"""
     request = urllib.request.Request(url, data=data, method=method)
     for key, value in (headers or {}).items():

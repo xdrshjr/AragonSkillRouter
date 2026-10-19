@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 
 from ..db import db_session, db_write, now_iso, uuid_pk
 from ..errors import ApiError, Code
-from ..logging import get_logger, redact
+from ..logging import get_logger
 from ..models import AgentSession, AgentToolCall, AgentTurn
 from ..schemas.common import paginate
 from . import events as agent_events

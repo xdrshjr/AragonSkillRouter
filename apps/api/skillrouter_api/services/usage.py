@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import desc, select
 
@@ -224,7 +224,7 @@ def record(
 
 def summary(hours: int = 24) -> dict:
     since = (
-        datetime.now(timezone.utc) - timedelta(hours=hours)
+        datetime.now(UTC) - timedelta(hours=hours)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     with db_session() as s:
         rows = list(s.scalars(select(UsageRecord).where(UsageRecord.at >= since)))

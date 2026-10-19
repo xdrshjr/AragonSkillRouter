@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, Response
 from ...db import now_iso
 from ...deps import require_token
 from ...errors import ApiError, Code
-from ...security.tokens import TokenContext, scope_allows
+from ...security.tokens import TokenContext
 from ...services import capabilities, execution, skills, tasks
 from ...settings import settings
 

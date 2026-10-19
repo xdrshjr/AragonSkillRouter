@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import desc, select
 
@@ -50,7 +50,7 @@ def check_login_allowed(username: str, ip: str | None) -> None:
     窗口按 **用户名 + IP** 组合统计（需求「5 次/5 分钟/IP+用户名」）：
     同一 IP 的其它账号、同一账号的其它 IP 都不受影响，避免误锁全员。
     """
-    window_start = datetime.now(timezone.utc) - timedelta(seconds=settings.login_window_seconds)
+    window_start = datetime.now(UTC) - timedelta(seconds=settings.login_window_seconds)
     with db_session() as s:
         stmt = select(LoginAttempt).where(
             LoginAttempt.username == username, LoginAttempt.success == 0
@@ -63,7 +63,7 @@ def check_login_allowed(username: str, ip: str | None) -> None:
         return
     last = _dt(recent[0].at)
     lock_until = (last or window_start) + timedelta(seconds=settings.login_lock_seconds)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if lock_until > now:
         retry = int((lock_until - now).total_seconds()) + 1
         raise ApiError(
@@ -92,10 +92,10 @@ def clear_login_window(username: str) -> None:
 
 
 def _window_start(now: datetime | None = None) -> str:
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     epoch = int(now.timestamp())
     start = epoch - (epoch % WINDOW_SECONDS)
-    return datetime.fromtimestamp(start, tz=timezone.utc).replace(microsecond=0).isoformat().replace(
+    return datetime.fromtimestamp(start, tz=UTC).replace(microsecond=0).isoformat().replace(
         "+00:00", "Z"
     )
 
@@ -139,7 +139,7 @@ def check_and_count(
     eff_conc = concurrency if concurrency is not None else (limit.concurrency if limit else None)
     eff_daily = daily_calls if daily_calls is not None else (limit.daily_calls if limit else None)
     window = _window_start()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     with db_write() as s:
         counter_id = hashlib.sha256(
             f"{scope_type}|{scope_id}|{window}|{WINDOW_SECONDS}".encode()
@@ -239,7 +239,7 @@ def record_cost(*, scope_type: str, scope_id: str, cost_usd: float) -> dict:
 
     `rate_counters` 只有 `calls`/`concurrent`，成本只记在 `quota_counters`（§A.3.4-1）。
     """
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     month = today[:7]
     if not cost_usd or cost_usd <= 0:
         return {"daily_usd": 0.0, "monthly_usd": 0.0, "applied": False}
@@ -289,7 +289,7 @@ def check_budget(
         limit = budget_for(scope_type, scope_id)
     if not limit or limit <= 0:
         return
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     window_period = today if period == "day" else today[:7]
     with db_session() as s:
         qc = s.scalar(
@@ -319,7 +319,7 @@ def check_budget(
 
 
 def quota_snapshot(scope_type: str, scope_id: str) -> dict:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     month = today[:7]
     with db_session() as s:
         daily = s.scalar(

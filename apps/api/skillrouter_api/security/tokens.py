@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -66,7 +66,7 @@ def _expired(value: str | None) -> bool:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return False
-    return dt <= datetime.now(timezone.utc)
+    return dt <= datetime.now(UTC)
 
 
 def verify_token(raw: str | None) -> TokenContext:

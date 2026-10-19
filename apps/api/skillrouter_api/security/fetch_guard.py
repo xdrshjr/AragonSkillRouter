@@ -131,7 +131,7 @@ async def fetch_text(
     timeout = httpx.Timeout(timeout_s or settings.fetch_timeout_s)
     current = url
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
-        for hop in range(MAX_REDIRECTS + 1):
+        for _hop in range(MAX_REDIRECTS + 1):
             async with client.stream(
                 "GET",
                 current,

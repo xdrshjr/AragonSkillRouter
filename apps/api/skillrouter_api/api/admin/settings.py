@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Response, UploadFile
 
 from ...crypto.keyring import rotate_master_key, rotation_status
 from ...deps import page_params, require_password_changed
-from ...errors import ApiError, Code
 from ...schemas.engine import SettingsUpdate
 from ...security.sessions import SessionContext
 from ...services import audit, backup_job, files, tasks

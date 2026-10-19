@@ -163,7 +163,7 @@ def diff(a: Any, b: Any, path: str = "") -> list[dict]:
     if isinstance(a, list) and isinstance(b, list):
         if len(a) != len(b):
             changes.append({"path": path, "change": "length", "from": len(a), "to": len(b)})
-        for index, (left, right) in enumerate(zip(a, b)):
+        for index, (left, right) in enumerate(zip(a, b, strict=False)):
             changes.extend(diff(left, right, f"{path}[{index}]"))
         return changes
     if a != b:

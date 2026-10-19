@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
@@ -26,7 +26,7 @@ from ..settings import settings
 
 def _since(hours: int) -> str:
     return (
-        datetime.now(timezone.utc) - timedelta(hours=hours)
+        datetime.now(UTC) - timedelta(hours=hours)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -76,7 +76,7 @@ def overview() -> dict:
     p95 = latencies[int(len(latencies) * 0.95) - 1] if latencies else None
 
     attention: list[dict] = []
-    now_dt = datetime.now(timezone.utc)
+    now_dt = datetime.now(UTC)
     for cred in creds:
         if cred.expires_at:
             try:

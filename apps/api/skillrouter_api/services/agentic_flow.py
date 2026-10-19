@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -17,7 +17,8 @@ from ..models import (
     CapabilityTestRun,
 )
 from ..schemas.common import paginate
-from . import audit, capabilities as capability_service
+from . import audit
+from . import capabilities as capability_service
 
 log = get_logger("skillrouter.run")
 
@@ -445,7 +446,7 @@ def request_approval(
 ) -> dict:
     approval_id = uuid_pk("apv")
     expires = (
-        datetime.now(timezone.utc) + timedelta(minutes=APPROVAL_TTL_MINUTES)
+        datetime.now(UTC) + timedelta(minutes=APPROVAL_TTL_MINUTES)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     with db_write() as s:
         s.add(

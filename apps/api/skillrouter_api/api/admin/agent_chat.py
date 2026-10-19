@@ -6,17 +6,16 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import select
+from fastapi.responses import StreamingResponse
 
 from ...agent import events as agent_events
 from ...agent import sessions as agent_sessions
-from ...deps import get_db, page_params, require_password_changed
-from ...db import db_session, db_write, now_iso, uuid_pk
+from ...deps import page_params, require_password_changed
 from ...errors import ApiError, Code
-from ...models import AgentSession, AgentTurn
 from ...schemas.agent import MessageRequest, RetryRequest, SessionCreate, StopRequest
 from ...security.sessions import SessionContext
-from ...services import audit, settings as settings_service, tasks as task_service
+from ...services import settings as settings_service
+from ...services import tasks as task_service
 from ...sse import broker
 from ...sse.events import sse_response
 
@@ -82,7 +81,9 @@ async def send_message(
 
 
 @router.get("/sessions/{session_id}/stream")
-async def stream(session_id: str, request: Request, ctx: SessionContext = Depends(require_password_changed)):
+async def stream(
+    session_id: str, request: Request, ctx: SessionContext = Depends(require_password_changed)
+) -> StreamingResponse:
     last_event_id = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id")
     turn_id = request.query_params.get("turn_id")
 
@@ -99,7 +100,7 @@ async def stream(session_id: str, request: Request, ctx: SessionContext = Depend
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": keep-alive\n\n"
                     continue
                 payload = event.get("payload") or {}

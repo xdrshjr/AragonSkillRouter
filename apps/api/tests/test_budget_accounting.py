@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -36,7 +36,7 @@ def _publish(client, admin, capability_id: str, version: str = "1.0.0") -> None:
 
 
 def _periods() -> tuple[str, str]:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     return today, today[:7]
 
 

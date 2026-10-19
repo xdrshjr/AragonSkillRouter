@@ -7,7 +7,7 @@ import io
 import json
 import sqlite3
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..crypto.masterkey import fingerprint
 from ..db.engine import schema_version
@@ -19,12 +19,12 @@ log = get_logger("skillrouter.run")
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def build_backup(*, quick: bool = False) -> dict:
     settings.ensure_dirs()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     settings.backup_dir.mkdir(parents=True, exist_ok=True)
     db_snapshot = settings.backup_dir / f"db-{stamp}.sqlite"
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -16,7 +16,7 @@ from tests.fixtures.fake_upstream import FakeUpstream, patch_httpx
 
 def _iso(delta_seconds: int) -> str:
     return (
-        datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)
+        datetime.now(UTC) + timedelta(seconds=delta_seconds)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 

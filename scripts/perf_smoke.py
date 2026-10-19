@@ -36,8 +36,12 @@ import math
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - 仅用于类型注解
+    import httpx
 
 DEFAULT_TARGETS = (
     "/api/admin/overview",
@@ -159,7 +163,9 @@ def print_table(samples: list[Sample], budgets: dict[str, float | None]) -> None
     log("")
 
 
-async def _run_get(client, sem, sample: Sample, path: str) -> None:
+async def _run_get(
+    client: httpx.AsyncClient, sem: asyncio.Semaphore, sample: Sample, path: str
+) -> None:
     import httpx
 
     async with sem:
@@ -173,7 +179,7 @@ async def _run_get(client, sem, sample: Sample, path: str) -> None:
 
 
 async def measure_endpoint(
-    client, path: str, requests: int, concurrency: int
+    client: httpx.AsyncClient, path: str, requests: int, concurrency: int
 ) -> Sample:
     sem = asyncio.Semaphore(concurrency)
     sample = Sample(
@@ -188,7 +194,7 @@ async def measure_endpoint(
 
 
 async def measure_async_submit(
-    client, capability: str, body: dict, requests: int, concurrency: int
+    client: httpx.AsyncClient, capability: str, body: dict, requests: int, concurrency: int
 ) -> Sample:
     import httpx
 
@@ -224,7 +230,7 @@ async def measure_async_submit(
     return sample
 
 
-async def measure_sse_first_byte(client, url: str) -> Sample:
+async def measure_sse_first_byte(client: httpx.AsyncClient, url: str) -> Sample:
     import httpx
 
     sample = Sample(name="SSE 首字节", method="GET", path=url)
@@ -435,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
             log(f"[perf] {sample.name} 失败样例：{sample.errors[0][:220]}")
 
     report = {
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "label": args.label,
         "base_url": args.base_url,
         "concurrency": args.concurrency,

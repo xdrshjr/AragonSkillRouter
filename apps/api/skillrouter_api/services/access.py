@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -122,7 +122,7 @@ def create_token(agent_id: str, data: dict, *, actor: str | None = None) -> dict
     expires_at = data.get("expires_at")
     if not expires_at and data.get("expires_in_days"):
         expires_at = (
-            datetime.now(timezone.utc) + timedelta(days=int(data["expires_in_days"]))
+            datetime.now(UTC) + timedelta(days=int(data["expires_in_days"]))
         ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     scopes = data.get("scopes")
     if scopes is None:
@@ -229,14 +229,14 @@ def quota_overview() -> dict:
     return {
         "limits": [
             {
-                "scope_type": l.scope_type,
-                "scope_id": l.scope_id,
-                "rpm": l.rpm,
-                "concurrency": l.concurrency,
-                "daily_calls": l.daily_calls,
-                "monthly_budget_usd": l.monthly_budget_usd,
+                "scope_type": lim.scope_type,
+                "scope_id": lim.scope_id,
+                "rpm": lim.rpm,
+                "concurrency": lim.concurrency,
+                "daily_calls": lim.daily_calls,
+                "monthly_budget_usd": lim.monthly_budget_usd,
             }
-            for l in limits
+            for lim in limits
         ],
         "counters": [
             {

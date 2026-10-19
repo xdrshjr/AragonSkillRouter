@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from argon2 import PasswordHasher
-from argon2.exceptions import HashingError, VerifyMismatchError, VerificationError
+from argon2.exceptions import HashingError, VerificationError, VerifyMismatchError
 
 try:  # argon2-cffi 23.1 用 InvalidHash，21.x 用 InvalidHashError
     from argon2.exceptions import InvalidHashError as _InvalidHash

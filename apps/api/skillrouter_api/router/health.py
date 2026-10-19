@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,7 +14,7 @@ WINDOW_MINUTES = 5
 
 def route_health(session: Session, route_id: str) -> dict:
     since = (
-        datetime.now(timezone.utc) - timedelta(minutes=WINDOW_MINUTES)
+        datetime.now(UTC) - timedelta(minutes=WINDOW_MINUTES)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     rows = list(
         session.scalars(
@@ -33,7 +33,7 @@ def route_health(session: Session, route_id: str) -> dict:
 
 def summarize(session: Session) -> dict:
     since = (
-        datetime.now(timezone.utc) - timedelta(minutes=WINDOW_MINUTES)
+        datetime.now(UTC) - timedelta(minutes=WINDOW_MINUTES)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     rows = list(session.scalars(select(CallLog).where(CallLog.created_at >= since)).all())
     total = len(rows)

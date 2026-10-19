@@ -5,8 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import re
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jsonschema
 from sqlalchemy import and_, case, desc, func, select
@@ -30,6 +29,7 @@ from ..models import (
     Task,
 )
 from ..schemas.common import paginate, sort_items
+from ..security.tokens import TokenContext
 from ..settings import settings
 from . import audit, routing, usage, versions
 
@@ -550,7 +550,7 @@ def _metrics_for(caps: list[tuple[str, str]]) -> dict[str, dict]:
     if not keys:
         return metrics
     since = (
-        (datetime.now(timezone.utc) - timedelta(hours=24))
+        (datetime.now(UTC) - timedelta(hours=24))
         .replace(microsecond=0)
         .isoformat()
         .replace("+00:00", "Z")
@@ -958,7 +958,7 @@ def publish(
             details={"issues": errors},
         )
     since = (
-        datetime.now(timezone.utc) - timedelta(hours=24)
+        datetime.now(UTC) - timedelta(hours=24)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     with db_session() as s:
         runs = list(
@@ -1283,7 +1283,7 @@ def describe(key: str) -> dict:
     }
 
 
-def catalog(token_ctx=None, *, tags: list[str] | None = None) -> list[dict]:
+def catalog(token_ctx: TokenContext | None = None, *, tags: list[str] | None = None) -> list[dict]:
     """令牌可见的能力目录（仅已发布 + 启用）。"""
     from ..security.tokens import scope_allows
 

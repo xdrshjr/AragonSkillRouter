@@ -29,7 +29,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # 宿主环境若为 production，npm 会跳过 devDependencies（本项目实测踩过），统一在这里关掉。
+  # 宿主环境若为 production，npm 会跳过 devDependencies（本项目实测踩过）。
+  # 但注意：`next build` **必须**在 NODE_ENV=production 下跑，否则 Next 会用 pages 的
+  # dev 运行时预渲染内置 /404、/_error，抛
+  #   Error: <Html> should not be imported outside of pages/_document
+  # 并让整次构建失败（Linux 上必现；只在 web 作业的 next build 步骤里覆盖回 production）。
+  # 依赖安装一律显式带 --include=dev，所以这里改成 development 只为 npm，不再影响构建。
   NODE_ENV: development
   PYTHONUNBUFFERED: '1'
 
@@ -251,6 +256,11 @@ jobs:
         run: npm run typecheck
       - name: next build（standalone）
         env:
+          # 关键：workflow 级 NODE_ENV=development 只服务于 npm 装 devDependencies，
+          # `next build` 必须回到 production，否则会用 pages 的 dev 运行时预渲染内置
+          # /404 与 /_error，抛「<Html> should not be imported outside of pages/_document」
+          # 让整次构建失败（Linux 必现、Windows 不复现，极难排查）。
+          NODE_ENV: production
           NEXT_TELEMETRY_DISABLED: '1'
           SKILLROUTER_API_URL: http://127.0.0.1:8000
         run: npm run build

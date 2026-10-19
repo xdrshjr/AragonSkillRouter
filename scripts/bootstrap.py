@@ -36,8 +36,8 @@ def _print(summary: dict) -> None:
         print(" 首次登录必须修改密码（默认密码仅此时生效一次）。")
     elif admin.get("reason") == "already_initialized":
         print(" 管理员已初始化，本次未创建/重置任何账号（重启与升级不会复活默认密码）。")
-    print(f" 启动：uvicorn skillrouter_api.main:app --port 8000  (cwd=apps/api)")
-    print(f" 前端：http://localhost:3000/login")
+    print(" 启动：uvicorn skillrouter_api.main:app --port 8000  (cwd=apps/api)")
+    print(" 前端：http://localhost:3000/login")
 
 
 def cmd_init() -> int:

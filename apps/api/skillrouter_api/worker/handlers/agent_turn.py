@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from ...agent import events as agent_events
-from ...agent.client import SessionSpec, TurnRequest, get_adapter
-from ...agent.prompting import SYSTEM_PROMPT, build_turn_prompt
 from ...agent import sessions as agent_sessions
+from ...agent.client import TurnRequest, get_adapter
+from ...agent.prompting import SYSTEM_PROMPT, build_turn_prompt
 from ...db import db_write, now_iso
-from ...errors import ApiError, Code
+from ...errors import ApiError
 from ...logging import get_logger, redact
 from ...models import AgentSession
 from ...services import settings as settings_service
@@ -76,8 +76,9 @@ async def handle(payload: dict) -> None:
 
 async def ingest_stream(session_id: str, turn_id: str) -> None:
     """从网关 SSE 拉取事件并落库 + 广播（由 API 进程的 SSE 端点驱动）。"""
-    import httpx
     import json
+
+    import httpx
 
     from ...settings import settings as app_settings
 

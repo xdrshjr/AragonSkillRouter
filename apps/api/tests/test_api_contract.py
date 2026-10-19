@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 
 V1_ENDPOINTS = [
     ("get", "/api/v1/health", False),
@@ -189,10 +190,10 @@ def test_pagination_shape(client, admin) -> None:
 
 
 def _iso(delta_seconds: int) -> str:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     return (
-        datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)
+        datetime.now(UTC) + timedelta(seconds=delta_seconds)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -443,9 +444,10 @@ def test_call_log_status_mapping(client, admin, make_capability, make_token, mon
     assert r.status_code == 200, r.text
     request_id = r.json()["request_id"]
 
+    from sqlalchemy import select
+
     from skillrouter_api.db import db_session
     from skillrouter_api.models import CallLog
-    from sqlalchemy import select
 
     with db_session() as s:
         row = s.scalar(select(CallLog).where(CallLog.request_id == request_id))

@@ -145,7 +145,7 @@ class Worker:
             if not lost:
                 # 优雅停机：清理完继续向上传播取消
                 raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.error("handler_timeout", extra={"object": queue_id, "detail": {"kind": row.kind}})
             leases.release(queue_id, worker_id=self.worker_id, ok=False, error="TIMEOUT")
             self._mark_task_failed(row.payload or {}, "TIMEOUT")
@@ -248,7 +248,6 @@ class Worker:
 
 
 async def main() -> None:
-    from ..db import db_session
     from ..models import SystemState
 
     with db_session() as s:

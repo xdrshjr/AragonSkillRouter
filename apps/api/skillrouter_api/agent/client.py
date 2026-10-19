@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -100,9 +99,10 @@ class AragonAgentAdapter:
             ) from exc
 
     async def capabilities(self) -> list[dict]:
+        from sqlalchemy import select
+
         from ..db import db_session
         from ..models import EngineCapabilityStatus
-        from sqlalchemy import select
 
         with db_session() as s:
             rows = list(
@@ -179,9 +179,10 @@ class AragonAgentAdapter:
             }
 
     async def history(self, session_id: str, limit: int = 20) -> list[dict]:
+        from sqlalchemy import select
+
         from ..db import db_session
         from ..models import AgentTurn
-        from sqlalchemy import select
 
         with db_session() as s:
             rows = list(

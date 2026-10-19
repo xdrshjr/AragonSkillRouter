@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 
 def test_bootstrap_endpoint_anonymous(client) -> None:
     r = client.get("/api/admin/auth/bootstrap")
@@ -58,7 +60,7 @@ def test_me_returns_engine_summary(client, admin) -> None:
 
 
 def test_session_expiry_and_revocation(client, admin) -> None:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from sqlalchemy import select, text
 
@@ -72,7 +74,7 @@ def test_session_expiry_and_revocation(client, admin) -> None:
         row = s.scalar(
             select(AdminSession).order_by(AdminSession.created_at.desc(), text("rowid DESC"))
         )
-        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        past = (datetime.now(UTC) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
         row.expires_at = past
     r = client.get("/api/admin/overview")
     assert r.status_code == 401

@@ -12,10 +12,10 @@ from sqlalchemy import desc, select
 from ..db import db_session, db_write, now_iso, uuid_pk
 from ..errors import ApiError, Code
 from ..logging import get_logger, redact
-from ..models import Capability, CapabilityVersion, Skill, SkillExport, SkillFile, SkillVersion
+from ..models import Capability, Skill, SkillExport, SkillFile, SkillVersion
 from ..schemas.common import paginate, sort_items
 from ..settings import settings
-from . import audit, capabilities as capability_service, files, versions
+from . import audit, files, versions
 
 log = get_logger("skillrouter.run")
 

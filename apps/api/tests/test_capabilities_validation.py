@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from tests.fixtures.builders import capability_payload
 from tests.fixtures.fake_upstream import FakeUpstream, patch_httpx
 
@@ -266,7 +268,7 @@ def test_test_result_shape_matches_frontend_contract(
 
 def test_brief_exposes_test_and_success_metrics(client, admin, make_capability, monkeypatch) -> None:
     """T-02：4 个列表指标的口径（含「无调用 → null 而不是 0」）。"""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from skillrouter_api.db import db_write, uuid_pk
     from skillrouter_api.models import CallLog
@@ -282,7 +284,7 @@ def test_brief_exposes_test_and_success_metrics(client, admin, make_capability, 
     assert item["call_count_24h"] == 0
 
     # 造 3 次调用 2 成功（落库 status='success'，即 LOGGED_STATUS['succeeded']）
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     with db_write() as s:
         for status in ("success", "success", "failed"):
             s.add(

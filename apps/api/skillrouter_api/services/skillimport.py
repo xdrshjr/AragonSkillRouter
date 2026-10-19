@@ -15,11 +15,12 @@ from sqlalchemy import select
 from ..db import db_session, db_write, now_iso, uuid_pk
 from ..errors import ApiError, Code
 from ..logging import get_logger, redact
-from ..models import Skill, SkillFile, SkillImport, SkillVersion
+from ..models import Skill, SkillImport
 from ..security.fetch_guard import fetch_text
 from ..security.instruction_scanner import scan
 from ..settings import settings
-from . import audit, skills as skill_service
+from . import audit
+from . import skills as skill_service
 
 log = get_logger("skillrouter.run")
 

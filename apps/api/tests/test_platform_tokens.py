@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from skillrouter_api.security.tokens import hash_secret, scope_allows, verify_token
-from skillrouter_api.security.tokens import TokenContext
+from skillrouter_api.security.tokens import TokenContext, hash_secret, scope_allows, verify_token
 from tests.fixtures.fake_upstream import FakeUpstream, patch_httpx
 
 

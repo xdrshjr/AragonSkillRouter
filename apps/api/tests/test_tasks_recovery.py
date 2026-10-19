@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -15,7 +15,7 @@ from tests.fixtures.fake_upstream import FakeUpstream, patch_httpx
 
 def _iso(delta_seconds: int) -> str:
     return (
-        datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)
+        datetime.now(UTC) + timedelta(seconds=delta_seconds)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -32,7 +32,7 @@ def test_lease_claim_and_renew() -> None:
 
 
 def test_expired_lease_is_reaped() -> None:
-    queue_id = task_service.enqueue("retention_sweep", {"probe": True})
+    task_service.enqueue("retention_sweep", {"probe": True})
     leases.claim("w-reap", ["retention_sweep"])
     with db_write() as s:
         row = s.scalar(select(TaskQueue).where(TaskQueue.payload["probe"].as_boolean().is_(True)))

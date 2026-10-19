@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..db.base import Base, IdMixin, TimestampMixin
+from ..db.base import Base, IdMixin
 
 
 class AdminUser(Base, IdMixin):

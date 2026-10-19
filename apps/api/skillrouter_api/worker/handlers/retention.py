@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -21,7 +21,7 @@ IN_FLIGHT_GRACE_S = 3600
 
 def _iso(seconds_offset: int) -> str:
     return (
-        datetime.now(timezone.utc) + timedelta(seconds=seconds_offset)
+        datetime.now(UTC) + timedelta(seconds=seconds_offset)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 

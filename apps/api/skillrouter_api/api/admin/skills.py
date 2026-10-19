@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends
 
 from ...deps import page_params, require_password_changed
-from ...errors import ApiError, Code
 from ...schemas.skills import (
     ExportRequest,
     ImportCommitRequest,

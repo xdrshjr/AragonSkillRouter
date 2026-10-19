@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from skillrouter_api.db import db_session, db_write
 from skillrouter_api.models import TaskQueue
@@ -16,7 +16,7 @@ from skillrouter_api.worker.runner import Worker
 
 def _iso(delta_seconds: int) -> str:
     return (
-        datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)
+        datetime.now(UTC) + timedelta(seconds=delta_seconds)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import Response
 
@@ -25,10 +27,10 @@ async def upload(
     data = await file.read()
     expires = None
     if expires_in_days:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         expires = (
-            datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+            datetime.now(UTC) + timedelta(days=expires_in_days)
         ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     saved = files.save_bytes(
         data,

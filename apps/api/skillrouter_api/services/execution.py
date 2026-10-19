@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import jsonschema
 from sqlalchemy import delete, select, update
@@ -71,7 +72,7 @@ def _fingerprint(capability_key: str, version: str, input_payload: dict, mode: s
 def _idem_expires() -> str:
     """占位有效期：`now + 24h`（沿用历史语义）。"""
     return (
-        (datetime.now(timezone.utc) + timedelta(hours=IDEM_TTL_HOURS))
+        (datetime.now(UTC) + timedelta(hours=IDEM_TTL_HOURS))
         .replace(microsecond=0)
         .isoformat()
         .replace("+00:00", "Z")

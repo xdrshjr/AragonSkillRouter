@@ -37,7 +37,7 @@ import os
 import sqlite3
 import sys
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 MANIFEST_FORMAT = "skillrouter-backup/1"
@@ -66,7 +66,7 @@ def log(message: str) -> None:
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso(dt: datetime) -> str:

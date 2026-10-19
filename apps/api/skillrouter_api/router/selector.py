@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..errors import ApiError, Code
@@ -53,7 +52,6 @@ def select(
             message=f"该能力不支持 {mode} 模式",
             details={"supported": supported_modes},
         )
-    file_io = (capability.get("file_io") or {})
     result = RouteSelection()
     providers_seen: set[str] = set()
 

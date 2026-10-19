@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -60,8 +60,9 @@ class Broker:
             self._subscribers.pop(stream_key, None)
 
     def _next_seq(self) -> int:
-        from ..db.engine import get_engine
         from sqlalchemy import text
+
+        from ..db.engine import get_engine
 
         try:
             with get_engine().connect() as conn:
@@ -84,7 +85,7 @@ class Broker:
 
     def cleanup(self) -> dict:
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(hours=KEEP_HOURS)
+            datetime.now(UTC) - timedelta(hours=KEEP_HOURS)
         ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         removed = 0
         with db_write() as s:

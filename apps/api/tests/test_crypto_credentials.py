@@ -18,7 +18,10 @@ def test_seal_open_roundtrip() -> None:
 
 def test_aad_binding_rejects_wrong_record() -> None:
     sealed = secretbox.seal("abc", record_type="credential", record_id="crd_1")
-    with pytest.raises(Exception):
+    # 具体异常类型是 ApiError（crypto/secretbox.py 里统一包装成 INTERNAL）
+    from skillrouter_api.errors import ApiError
+
+    with pytest.raises(ApiError):
         secretbox.open_sealed(sealed, record_type="credential", record_id="crd_2")
 
 

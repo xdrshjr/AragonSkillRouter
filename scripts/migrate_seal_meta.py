@@ -31,7 +31,7 @@ import io
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,10 +100,10 @@ def run_apply(path: Path, rows: list[tuple[str, dict, str | None]]) -> dict:
     return {"sealed": sealed_now, "failed": failed}
 
 
-def run_unseal(path: Path, rows, out: Path) -> dict:
+def run_unseal(path: Path, rows: list[tuple[str, str]], out: Path) -> dict:
     payload = {
         "format": EXPORT_FORMAT,
-        "exported_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "exported_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "db_path": str(path),
         "credentials": {},
     }

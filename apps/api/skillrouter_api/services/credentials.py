@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import desc, select
 
@@ -205,7 +205,7 @@ def list_credentials(
     if status == "expiring":
         # 「即将过期」= `expires_at` 非空且 ≤ EXPIRING_DAYS 天（§A.3.11）
         horizon = (
-            datetime.now(timezone.utc) + timedelta(days=EXPIRING_DAYS)
+            datetime.now(UTC) + timedelta(days=EXPIRING_DAYS)
         ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         items = [i for i in items if i.get("expires_at") and i["expires_at"] <= horizon]
     elif status:
@@ -563,10 +563,10 @@ def record_verification(
 
 
 def expiring_within(days: int = 7) -> list[dict]:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     limit = (
-        datetime.now(timezone.utc) + timedelta(days=days)
+        datetime.now(UTC) + timedelta(days=days)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     with db_session() as s:
         rows = list(
