@@ -393,9 +393,19 @@ def finalize_task_call(task_id: str) -> bool:
             return False
         call.status = logged
         call.needs_reconcile = 1 if logged == "status_unknown" else 0
-        error = task.error or {}
-        if isinstance(error, dict) and error.get("code"):
+        # 错误码来源：`Task` 模型**没有** `error` 列。这里曾读 `task.error`，直接抛
+        # AttributeError 把整个 db_write 事务回滚掉 —— 表现为异步调用记录永远停在
+        # `queued`（§9.1 第 1 项想修的症状以另一种形式复发）。
+        # 正确来源：①执行器写进 `task.result["error"]` 的结构化错误；②`task.error_code` 列。
+        error: dict = {}
+        if isinstance(task.result, dict):
+            candidate = task.result.get("error")
+            if isinstance(candidate, dict):
+                error = candidate
+        if error.get("code"):
             call.error_code = str(error["code"])
+        elif task.error_code:
+            call.error_code = str(task.error_code)
         elif str(task.status) == "canceled":
             call.error_code = "CANCELED"
         call.http_status = call.http_status or (200 if logged == "success" else None)

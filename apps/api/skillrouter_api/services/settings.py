@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from sqlalchemy import select
 
@@ -71,7 +72,7 @@ def _as_list(value) -> list[str]:  # noqa: ANN001
     return [str(x).strip() for x in value if str(x).strip()]
 
 
-def get_value(key: str, default: object = None) -> object:  # noqa: ANN001
+def get_value(key: str, default: Any = None) -> Any:  # noqa: ANN401
     with db_session() as s:
         row = s.get(Setting, key)
         if row is None:
