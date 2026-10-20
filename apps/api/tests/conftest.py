@@ -126,7 +126,7 @@ def make_token(client: TestClient, admin: dict):
         r = client.post(
             "/api/admin/access/agents",
             headers=admin["headers"],
-            json={"name": f"test-agent-{counter['n']}-{os.urandom(2).hex()}"},
+            json={"name": f"test-agent-{counter['n']}-{os.urandom(8).hex()}"},
         )
         assert r.status_code == 201, r.text
         agent_id = r.json()["id"]

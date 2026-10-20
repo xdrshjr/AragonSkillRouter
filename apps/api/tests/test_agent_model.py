@@ -413,3 +413,253 @@ def test_check_refuses_200_with_a_foreign_body(configured, monkeypatch) -> None:
     result = _run(agent_model.check())
     assert result["ok"] is False
     assert result["checked"] is True
+
+
+# ── protocol / wire / paths（spec §3.6，T-24…T-27、T-32、T-33、T-35）──
+
+
+def _custom_provider(client, admin, *, base_url: str = "https://gw.internal/openai") -> dict:
+    import os as _os
+
+    slug = f"gw-{_os.urandom(3).hex()}"
+    r = client.post(
+        "/api/admin/providers",
+        headers=admin["headers"],
+        json={"slug": slug, "name": "自建网关", "category": "llm", "base_url": base_url},
+    )
+    assert r.status_code == 201, r.text
+    provider = r.json()
+    r = client.post(
+        f"/api/admin/providers/{provider['id']}/credentials",
+        headers=admin["headers"],
+        json={
+            "name": "gw 凭证",
+            "kind": "llm",
+            "auth_type": "bearer",
+            "secret": "gw-verysecret-0123456",
+            "meta": {"llm_protocol": "custom"},
+        },
+    )
+    assert r.status_code == 201, r.text
+    return {"provider": provider, "credential": r.json()}
+
+
+def test_custom_with_anthropic_wire(configured, client, admin) -> None:
+    """T-24：`protocol=custom` + `wire=anthropic` → `providerId == "anthropic"`。"""
+    bundle = _custom_provider(client, admin, base_url="https://gw.internal/anthropic")
+    r = client.patch(
+        "/api/admin/agent/config",
+        headers=admin["headers"],
+        json={
+            "protocol": "custom",
+            "wire": "anthropic",
+            "model": "claude-sonnet-4-5",
+            "base_url": "https://gw.internal/anthropic",
+            "credential_id": bundle["credential"]["id"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    effective = r.json()["effective"]
+    assert effective["protocol"] == "custom"
+    assert effective["wire"] == "anthropic"
+    assert effective["model"]["providerId"] == "anthropic"
+    assert effective["problems"] == []
+
+
+def test_custom_credential_refs_are_keyed_by_wire(configured, client, admin) -> None:
+    """T-32（P0）：`credential_refs` 的键必须是 `wire` —— 网关按 `refs[model.providerId]` 取。"""
+    bundle = _custom_provider(client, admin, base_url="https://gw.internal/openai")
+    r = client.patch(
+        "/api/admin/agent/config",
+        headers=admin["headers"],
+        json={
+            "protocol": "custom",
+            "wire": "openai",
+            "model": "qwen2.5-72b-instruct",
+            "base_url": "https://gw.internal/openai",
+            "credential_id": bundle["credential"]["id"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    effective = r.json()["effective"]
+    assert effective["model"]["providerId"] == "openai"
+    assert list(effective["credential_refs"]) == ["openai"]
+    assert effective["credential_refs"]["openai"] == bundle["credential"]["id"]
+    assert "custom" not in effective["credential_refs"]
+
+
+def test_wire_is_rejected_for_non_custom(configured, client, admin) -> None:
+    """T-25：`protocol=google` + `wire=openai` → 400（wire 只对 custom 生效）。"""
+    r = client.patch(
+        "/api/admin/agent/config",
+        headers=admin["headers"],
+        json={"protocol": "google", "wire": "openai"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "VALIDATION_FAILED"
+    assert "custom" in r.json()["error"]["message"]
+
+
+def test_legacy_provider_only_config_still_resolves(configured, client, admin) -> None:
+    """T-26：老配置只有 `provider=anthropic` → 仍然 `ready=true`（INV-4）。"""
+    r = client.get("/api/admin/agent/config", headers=admin["headers"])
+    assert r.status_code == 200
+    payload = client.patch(
+        "/api/admin/agent/config",
+        headers=admin["headers"],
+        json={"provider": "anthropic"},
+    )
+    assert payload.status_code == 200, payload.text
+    assert payload.json()["effective"]["ready"] is True
+    assert payload.json()["model"]["provider"] == "anthropic"
+    assert payload.json()["model"]["protocol"] == "anthropic"
+    assert r.json()["protocols"]  # 注册表随 GET 一起返回
+
+
+def test_model_outside_catalog_is_only_a_warning(configured, credential) -> None:
+    """T-27：模型不在目录里 → `warnings` 有提示，但 `ready` 仍为 true。"""
+    from skillrouter_api.db import db_write
+    from skillrouter_api.models import LlmModelCatalog
+    from skillrouter_api.services.llm import catalog as model_catalog
+
+    settings_service.update_agent_config(
+        {
+            "protocol": "anthropic",
+            "model": "some-new-model",
+            "base_url": "https://open.bigmodel.cn/api/anthropic",
+            "credential_id": credential["id"],
+        }
+    )
+    resolution = agent_model.resolve()
+    key = model_catalog.target_key(
+        resolution.protocol,
+        resolution.wire,
+        (resolution.model or {}).get("baseUrl") or "",
+        credential["id"],
+    )
+    with db_write() as s:
+        s.add(
+            LlmModelCatalog(
+                dedupe_key=key,
+                credential_id=credential["id"],
+                provider_id=credential["provider_id"],
+                protocol="anthropic",
+                wire="anthropic",
+                base_url=(resolution.model or {}).get("baseUrl") or "",
+                models=[{"id": "claude-sonnet-4-5", "display_name": "Claude", "kind": "chat"}],
+                model_count=1,
+                truncated=0,
+                source="upstream",
+                fetched_at="2026-02-10T00:00:00Z",
+                expires_at="2036-02-10T00:00:00Z",
+                created_at="2026-02-10T00:00:00Z",
+                updated_at="2026-02-10T00:00:00Z",
+            )
+        )
+    resolution = agent_model.resolve()
+    assert resolution.ready is True, resolution.problems
+    assert any("不在最近一次模型清单里" in item for item in resolution.warnings)
+
+
+def test_model_protocol_mismatch_blocks_readiness(configured, client, admin, credential) -> None:
+    """T-35：`protocol=openai` + `model=claude-sonnet-4-5` → `ready=false`（不是 warning）。"""
+    r = client.patch(
+        "/api/admin/agent/config",
+        headers=admin["headers"],
+        json={
+            "protocol": "openai",
+            "model": "claude-sonnet-4-5",
+            "base_url": "https://gw.internal/openai",
+            "credential_id": credential["id"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    effective = r.json()["effective"]
+    assert effective["ready"] is False
+    assert any("不匹配" in item for item in effective["problems"])
+
+
+def test_custom_without_credential_or_matching_url_is_not_ready(client, admin) -> None:
+    """T-33：`custom` 没有显式凭证、地址也不命中任何提供商 → `ready=false`。
+
+    实测旧打分函数在「全 0 分」时返回**第一个** active 凭证，等于随机挑一把钥匙。
+    """
+    r = client.patch(
+        "/api/admin/agent/config",
+        headers=admin["headers"],
+        json={
+            "protocol": "custom",
+            "wire": "openai",
+            "model": "qwen2.5-72b-instruct",
+            "base_url": "https://unmatched.example.com/v1",
+            "credential_id": None,
+        },
+    )
+    assert r.status_code == 200, r.text
+    effective = r.json()["effective"]
+    assert effective["ready"] is False
+    assert any("自定义协议必须显式选择凭证" in item for item in effective["problems"])
+    assert effective["credential_refs"] == {}
+
+
+def test_paths_are_validated_for_custom(configured, client, admin) -> None:
+    bundle = _custom_provider(client, admin)
+    bad = client.patch(
+        "/api/admin/agent/config",
+        headers=admin["headers"],
+        json={"protocol": "custom", "wire": "openai", "paths": {"models": "../etc/passwd"}},
+    )
+    assert bad.status_code == 400
+    good = client.patch(
+        "/api/admin/agent/config",
+        headers=admin["headers"],
+        json={
+            "protocol": "custom",
+            "wire": "openai",
+            "model": "qwen2.5-72b-instruct",
+            "base_url": "https://gw.internal/openai",
+            "credential_id": bundle["credential"]["id"],
+            "paths": {"models": "/v2/models", "chat": "/v2/chat"},
+        },
+    )
+    assert good.status_code == 200, good.text
+    assert good.json()["model"]["paths"]["models"] == "/v2/models"
+
+
+def test_provider_alias_conflict_is_rejected(client, admin) -> None:
+    r = client.patch(
+        "/api/admin/agent/config",
+        headers=admin["headers"],
+        json={"provider": "openai", "protocol": "anthropic"},
+    )
+    assert r.status_code == 400
+    assert "旧名" in r.json()["error"]["hint"]
+
+
+def test_check_keeps_legacy_fields(configured, monkeypatch) -> None:
+    """`/agent/config/test` 的旧字段一个都不少，新增字段只增不改。"""
+    _patch_probe_http(
+        monkeypatch, body={"type": "message", "content": [{"type": "text", "text": "pong"}]}
+    )
+    result = _run(agent_model.check())
+    for key in (
+        "ok",
+        "checked",
+        "provider",
+        "model",
+        "base_url",
+        "status",
+        "latency_ms",
+        "transport",
+        "text_chars",
+        "credential",
+        "problems",
+        "detail",
+    ):
+        assert key in result, f"旧字段 {key} 丢了"
+    for key in ("protocol", "wire", "resolved_url", "mode", "stages", "probe_id"):
+        assert key in result, f"新字段 {key} 缺失"
+    assert result["mode"] == "completion"
+    assert [stage["stage"] for stage in result["stages"]] == ["completion"], (
+        "既有端点必须只发一次生成请求（不得先插一个 GET）"
+    )

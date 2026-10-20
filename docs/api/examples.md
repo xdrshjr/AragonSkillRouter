@@ -4,7 +4,7 @@
 > 都是占位符，替换成你自己的值即可。
 > 示例覆盖：health、whoami、capabilities（list/get）、invoke（sync / async / stream）、
 > task status / cancel、file upload + 签名下载、skills（list / read / bundle）、MCP（initialize / tools.list / tools.call）、
-> 管理端 tasks 列表与备份（POST）。
+> 管理端 tasks 列表与备份（POST）、管理端 LLM 服务配置（协议注册表 / 实时连通 / 取模型 / 探测历史）。
 >
 > **令牌只用请求头**：`Authorization: Bearer <token>`。把令牌放进查询串的旧通道（`token` 查询参数）
 > 默认关闭，传了会返回 `400 TOKEN_INVALID`；逃生阀 `SKILLROUTER_ALLOW_QUERY_TOKEN` 见 §0 表格最后一行。
@@ -729,7 +729,304 @@ def mcp_call(method: str, params: dict | None = None, req_id: int = 1, session: 
 > MCP 通道的**真实客户端**联调仍是「待验证」（附录 C 全部保持待验证）。
 > 上面的命令只保证协议形状可复制，不等于已用 MCP 客户端跑通。
 
-## 10. 错误处理（照 `code` 分支，不要匹配文案）
+## 10. 管理端 LLM 服务配置（四协议 · 实时测试 · 一键取模型）
+
+四个 `/api/admin/llm/*` 新端点 + 一条「凭证 → 模型清单」。**协议差异只在后端**
+（`apps/api/skillrouter_api/services/llm/protocols.py`）——前端只渲染注册表返回，
+不要写 `if protocol === 'anthropic'`。
+
+```bash
+export SR_BASE="https://router.example.com"   # 本机开发：http://127.0.0.1:8000
+export CSRF="<登录响应里的 csrf_token>"          # 写方法必须带，否则 403 CSRF_INVALID
+```
+
+| 端点 | 用途 | 计费 |
+|---|---|---|
+| `GET /api/admin/llm/protocols` | 协议注册表（四张卡片的唯一数据源） | 否 |
+| `POST /api/admin/llm/test-connection` | 实时连通测试（`auth` / `completion` / `both`） | `completion` / `both` 计费 1 次 |
+| `POST /api/admin/llm/models` | 取模型清单（归一化 + TTL 缓存 + 降级） | 否 |
+| `GET /api/admin/credentials/{credential_id}/models` | 用**已保存**凭证取清单（协议可覆盖） | 否 |
+| `GET /api/admin/llm/probes` | 探测历史（列表项已含完整 `stages`） | 否 |
+
+`test-connection` / `models` 的请求体里，凭证二选一：`credential_id`（已保存）
+**或** `secret`（草稿，≤8192 字符，只在本次请求的进程内存里用，不落库不落日志）。
+两者都给 / 都不给都是 `400 VALIDATION_FAILED`。
+
+### 10.1 `GET /api/admin/llm/protocols`（协议注册表）
+
+```bash
+curl -sS -b cookies.txt "$SR_BASE/api/admin/llm/protocols"
+```
+
+```json
+{
+  "items": [
+    {"key":"openai","label":"OpenAI","label_zh":"OpenAI","one_liner":"Chat Completions 与 /models",
+     "wire":"openai","default_base_url":"https://api.openai.com/v1",
+     "base_url_hint":"https://api.openai.com/v1（含 /v1）","docs_url":"https://platform.openai.com/docs",
+     "auth_styles":["bearer"],"default_auth_style":"bearer",
+     "models_path":"models","chat_path":"chat/completions","supports_models_list":true},
+    {"key":"anthropic","label":"Anthropic","label_zh":"Anthropic","one_liner":"Messages API（Claude 家族）",
+     "wire":"anthropic","default_base_url":"https://api.anthropic.com",
+     "base_url_hint":"https://api.anthropic.com（不要带 /v1）","docs_url":"https://docs.anthropic.com",
+     "auth_styles":["api_key"],"default_auth_style":"api_key",
+     "models_path":"/v1/models","chat_path":"/v1/messages","supports_models_list":true},
+    {"key":"google","label":"Google","label_zh":"Google","one_liner":"Gemini generateContent",
+     "wire":"google","default_base_url":"https://generativelanguage.googleapis.com",
+     "base_url_hint":"https://generativelanguage.googleapis.com（不要带 /v1beta）",
+     "docs_url":"https://ai.google.dev/api","auth_styles":["api_key"],"default_auth_style":"api_key",
+     "models_path":"/v1beta/models","chat_path":"/v1beta/models/{model}:generateContent",
+     "supports_models_list":true},
+    {"key":"custom","label":"Custom","label_zh":"自定义",
+     "one_liner":"任意兼容网关（vLLM / LiteLLM / One-API / 自建）",
+     "wire":null,"default_base_url":"","base_url_hint":"https://your-gateway/v1","docs_url":"",
+     "auth_styles":["bearer","api_key","basic","header","none"],"default_auth_style":"bearer",
+     "models_path":null,"chat_path":null,"supports_models_list":true,
+     "paths_inherit_from_wire":true,"paginate":null}
+  ],
+  "wires": ["openai","anthropic","google"]
+}
+```
+
+> `custom` 的 `models_path` / `chat_path` 回 **`null`**：它的默认路径**继承所选 `wire`**
+> （`wire=anthropic` → 取模型 `/v1/models`、完成 `/v1/messages`），由后端 `effective_paths()` 现算。
+> `supports_models_list` 仍然是 `true` —— `null` **不等于**「这个网关没有模型清单」。
+
+```ts
+type LlmProtocolSpec = {
+  key: 'openai' | 'anthropic' | 'google' | 'custom';
+  label: string; label_zh: string; one_liner: string;
+  wire: 'openai' | 'anthropic' | 'google' | null;
+  default_base_url: string; base_url_hint: string; docs_url: string;
+  auth_styles: string[]; default_auth_style: string;
+  models_path: string | null; chat_path: string | null;
+  supports_models_list: boolean;
+  paths_inherit_from_wire?: boolean;
+};
+
+const protocols = (await (await fetch(`${base}/api/admin/llm/protocols`)).json()) as {
+  items: LlmProtocolSpec[];
+  wires: string[];
+};
+// 四张协议卡片 = protocols.items；地址框 placeholder = base_url_hint
+const card = protocols.items.find((p) => p.key === 'anthropic')!;
+```
+
+### 10.2 `POST /api/admin/llm/test-connection`（实时连通，草稿也能测）
+
+`mode` 决定花不花钱：`auth`（**默认，不计费**，只 `GET` 模型清单）/ `completion`（一次最小生成，
+计费 1 次）/ `both`（先 auth，成功才跑 completion）。
+
+```bash
+# 10.2.1 主按钮「测试连接」：草稿密钥也能测，不计费（mode 缺省即 auth）
+curl -sS -b cookies.txt -X POST "$SR_BASE/api/admin/llm/test-connection" \
+  -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
+  -d '{"protocol":"anthropic","secret":"sk-ant-xxx","base_url":"https://api.anthropic.com"}'
+
+# 10.2.2 「测试生成（计费 1 次）」：显式 mode=both，必须带 model
+curl -sS -b cookies.txt -X POST "$SR_BASE/api/admin/llm/test-connection" \
+  -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
+  -d '{"protocol":"anthropic","secret":"sk-ant-xxx","base_url":"https://api.anthropic.com",
+       "mode":"both","model":"claude-sonnet-4-5"}'
+
+# 10.2.3 用已保存的凭证测（不传 secret，避免密钥第二次经过前端）
+curl -sS -b cookies.txt -X POST "$SR_BASE/api/admin/llm/test-connection" \
+  -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
+  -d '{"protocol":"openai","credential_id":"crd_01J9Z9AB","mode":"auth"}'
+
+# 10.2.4 自定义网关：地址带子路径，线协议与认证方式自己选
+curl -sS -b cookies.txt -X POST "$SR_BASE/api/admin/llm/test-connection" \
+  -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
+  -d '{"protocol":"custom","wire":"openai","base_url":"https://gw.internal/openai",
+       "secret":"gw-xxxx","auth_style":"bearer","mode":"auth"}'
+```
+
+成功（`mode=both`）：
+
+```json
+{
+  "ok": true,
+  "protocol": "anthropic",
+  "wire": "anthropic",
+  "base_url": "https://api.anthropic.com",
+  "resolved_url": "https://api.anthropic.com/v1/models?limit=1000",
+  "mode": "both",
+  "stages": [
+    {"stage": "auth", "ok": true, "http_status": 200, "latency_ms": 212,
+     "detail": "GET …/v1/models → 200，识别到 12 个模型", "model_count": 12},
+    {"stage": "completion", "ok": true, "http_status": 200, "latency_ms": 640,
+     "model": "claude-sonnet-4-5", "detail": "模型正常回话", "text_chars": 2}
+  ],
+  "probe_id": "llmp_9f3c1a2b7d4e",
+  "checked_at": "2026-02-11T08:31:07Z",
+  "problems": [],
+  "credential": {"id": "crd_…", "name": "anthropic-prod", "secret_mask": "sk-…-9f2c"},
+  "inferred": false,
+  "notes": []
+}
+```
+
+**失败也算一次成功调用**（HTTP `200` + `ok:false`，不是 500）——「上游拒绝鉴权」和
+「模型名写错」必须能被页面上的人话解释清楚：
+
+```json
+{
+  "ok": false, "protocol": "google", "wire": "google",
+  "resolved_url": "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+  "stages": [{"stage": "auth", "ok": false, "http_status": 403, "latency_ms": 188,
+              "detail": "{\"error\":{\"code\":403,\"message\":\"API key not valid\"}}"}],
+  "error_code": "UPSTREAM_AUTH",
+  "hint": "上游拒绝鉴权：检查 API key 是否属于该项目，或该 key 是否启用了 Generative Language API",
+  "problems": ["鉴权阶段失败，未发出计费请求"]
+}
+```
+
+`auth` 失败时 `completion` 阶段**不执行**（记「未执行（鉴权未通过）」），所以 `mode=both`
+在鉴权失败时不会产生任何计费请求。
+
+| HTTP | code | 何时 |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `secret` 与 `credential_id` 同时给/都不给、`custom` 缺 `base_url`、`mode` 含 completion 却没模型名、非 `custom` 协议给了 `wire` |
+| 400 | `LLM_PROTOCOL_UNSUPPORTED` | `protocol` 不在 `openai\|anthropic\|google\|custom` 内 |
+| 400 | `SSRF_BLOCKED` | 地址不是 http(s)、缺主机名，或命中云元数据地址（`netpolicy` 硬编码拒绝；**不读** `SKILLROUTER_SSRF_DENY`，管理员配置的上游允许私网与回环） |
+| 404 | `NOT_FOUND` | `credential_id` 指向的凭证不存在或已删除 |
+| 409 | `CREDENTIAL_DISABLED` | 凭证不是 `active` |
+| 429 | `LLM_PROBE_THROTTLED` | 同一身份超过 10 次/60 秒；`details.retry_after_s` 给等待秒数 |
+| 502 | `UPSTREAM_AUTH` / `UPSTREAM_INVALID_RESPONSE` | 上游 401/403；或上游 200 但响应里没有模型数组 / 不是该协议的完成结构 |
+| 503 | `UPSTREAM_UNAVAILABLE` | 连不上（含直连回退后仍失败） |
+| 504 | `UPSTREAM_TIMEOUT` | 超时（`auth` 20s / `completion` 45s） |
+
+```ts
+async function testConnection(body: Record<string, unknown>) {
+  const res = await fetch(`${base}/api/admin/llm/test-connection`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf() },
+    body: JSON.stringify({ mode: 'auth', ...body }),   // 默认不计费
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`${data.error.code}: ${data.error.hint ?? data.error.message}`);
+  // 200 也可能 ok=false：结论在 error_code + hint 里，不在 HTTP 状态码里
+  if (!data.ok) console.warn(data.error_code, data.hint, data.stages);
+  return data as { ok: boolean; stages: { stage: string; http_status: number; latency_ms: number }[] };
+}
+```
+
+### 10.3 `POST /api/admin/llm/models`（一键取模型）
+
+请求 = `ProbeTarget`（`protocol` + `credential_id`/`secret` + `base_url` …）+ 下面三个参数：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `refresh` | `false` | `true` = 跳过缓存直打上游；`false` = 命中未过期缓存就不发请求 |
+| `include_non_llm` | `false` | `true` 时连 embedding / audio / image 一起返回 |
+| `limit` | `500` | 上限 500，超出置 `truncated=true` |
+
+```bash
+# 首次取（走上游）：
+curl -sS -b cookies.txt -X POST "$SR_BASE/api/admin/llm/models" \
+  -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
+  -d '{"protocol":"anthropic","secret":"sk-ant-xxx","base_url":"https://api.anthropic.com","refresh":true}'
+
+# 之后取（命中 TTL 缓存，10 分钟内的默认行为）：
+curl -sS -b cookies.txt -X POST "$SR_BASE/api/admin/llm/models" \
+  -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
+  -d '{"protocol":"anthropic","secret":"sk-ant-xxx","base_url":"https://api.anthropic.com"}'
+```
+
+```json
+{
+  "items": [
+    {"id":"claude-sonnet-4-5","display_name":"Claude Sonnet 4.5","kind":"chat","recommended":true,
+     "context_window":null,"methods":[],"created_at":"2025-09-29T00:00:00Z","owned_by":null},
+    {"id":"claude-haiku-4-5","display_name":"Claude Haiku 4.5","kind":"chat","recommended":true,
+     "context_window":null,"methods":[],"created_at":"2025-10-01T00:00:00Z","owned_by":null}
+  ],
+  "count": 2,
+  "source": "upstream",
+  "fetched_at": "2026-02-11T08:31:07Z",
+  "expires_at": "2026-02-11T08:41:07Z",
+  "truncated": false,
+  "probe_id": "llmp_9f3c1a2b7d4e",
+  "notes": ["已从地址尾部去掉重复的版本段 /v1"],
+  "warning": null
+}
+```
+
+> `source` 有四种取值：`upstream`（这次真打了上游）/ `cache`（未过期缓存）/
+> `cache-stale`（上游失败，展示 <24h 的旧值，**200 + warning**）/
+> 无旧值可降级 → `503 UPSTREAM_UNAVAILABLE`（`details.upstream` 给脱敏摘要）。
+> `kind` 只有 `chat / embedding / audio / image / rerank / other`；`recommended` 只是**排序**提示，
+> 不代表可用来做对话。
+
+```ts
+type LlmModelEntry = { id: string; display_name: string; kind: string; recommended: boolean;
+  context_window: number | null; methods: string[] };
+
+async function fetchModels(protocol: string, credentialId: string, refresh = false) {
+  const res = await fetch(`${base}/api/admin/llm/models`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf() },
+    body: JSON.stringify({ protocol, credential_id: credentialId, refresh }),
+  });
+  if (res.status === 503) throw new Error('上游不可用，且没有可降级的旧清单');
+  const data = await res.json();
+  if (data.warning) console.warn(data.warning);   // cache-stale 时提醒「展示的是旧清单」
+  return (data.items as LlmModelEntry[]).filter((m) => m.kind === 'chat');
+}
+```
+
+### 10.4 `GET /api/admin/credentials/{credential_id}/models`（已保存凭证 → 立刻有清单）
+
+`ProbeTarget` 由凭证推导（协议取 `meta.llm_protocol`，缺省按提供商名推断并在响应 `notes` 里说明）。
+
+```bash
+# 默认读缓存（refresh 默认 false）
+curl -sS -b cookies.txt "$SR_BASE/api/admin/credentials/crd_01J9Z9AB/models"
+
+# 强制刷新；协议可覆盖（例如同一把钥匙挂在「自定义」提供商下但走 anthropic 线协议）
+curl -sS -b cookies.txt \
+  "$SR_BASE/api/admin/credentials/crd_01J9Z9AB/models?refresh=1&protocol=anthropic"
+```
+
+响应与 §10.3 完全一致（同一套归一化与缓存）。
+
+> 凭证不是 `active` → `409 CREDENTIAL_DISABLED`；不存在 → `404 NOT_FOUND`；
+> `llm` 类凭证的「检测」也走同一条协议感知探测（`GET {base}/v1/models` 而不是 `GET {base}/models`），
+> 且**不计费**。
+
+### 10.5 `GET /api/admin/llm/probes`（探测历史）
+
+`page` / `page_size`（≤100）→ `{items, page, page_size, total}`；`credential_id` 可筛选。
+
+```bash
+# 最近 10 条（按时间倒序；列表项已带完整 stages，前端「点开」是纯就地展开）
+curl -sS -b cookies.txt "$SR_BASE/api/admin/llm/probes?page=1&page_size=10"
+
+# 只看某张凭证的探测
+curl -sS -b cookies.txt "$SR_BASE/api/admin/llm/probes?credential_id=crd_01J9Z9AB&page_size=20"
+```
+
+```json
+{
+  "items": [
+    {"id":"llmp_9f3c1a2b7d4e","protocol":"anthropic","wire":"anthropic",
+     "base_url":"https://api.anthropic.com","mode":"both","ok":true,
+     "stages":[{"stage":"auth","ok":true,"http_status":200,"latency_ms":212,"model_count":12},
+               {"stage":"completion","ok":true,"http_status":200,"latency_ms":640,"text_chars":2}],
+     "http_status":200,"latency_ms":852,"error_code":null,"detail_redacted":null,
+     "credential_id":"crd_01J9Z9AB","at":"2026-02-11T08:31:07Z"}
+  ],
+  "page": 1, "page_size": 10, "total": 1
+}
+```
+
+> **没有** `GET /api/admin/llm/probes/{probe_id}`：一次探测最多两个阶段，列表项已经全带了。
+> `probe_id` 的用途是和 `var/logs` 里的 `llm_probe_*` 事件、`audit_logs` 的 `llm.probe` 行对上号。
+> `detail` / `detail_redacted` 都已脱敏；草稿探测的 `credential_id` 是 `null`（不回显任何密钥）。
+
+## 11. 错误处理（照 `code` 分支，不要匹配文案）
 
 ```ts
 type ApiError = { code: string; message: string; hint?: string; retryable?: boolean; request_id: string };
@@ -801,7 +1098,7 @@ def explain(err: dict) -> str:
 
 完整错误码表见 [runbook/troubleshooting.md](../runbook/troubleshooting.md)（与 spec 附录 A 一致）。
 
-## 11. OpenAPI
+## 12. OpenAPI
 
 `docs/api/openapi.json` 由 CI 从 FastAPI 应用导出（不是手写）：
 

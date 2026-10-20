@@ -13,9 +13,9 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=next.js&logoColor=white)](apps/web/package.json)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](apps/api/requirements.txt)
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](db/)
-[![tests](https://img.shields.io/badge/tests-386%20passed-brightgreen)](#质量与证据)
+[![tests](https://img.shields.io/badge/tests-473%20passed-brightgreen)](#质量与证据)
 [![ci](https://github.com/xdrshjr/AragonSkillRouter/actions/workflows/ci.yml/badge.svg)](https://github.com/xdrshjr/AragonSkillRouter/actions/workflows/ci.yml)
-[![API](https://img.shields.io/badge/OpenAPI-118%20paths-85EA2D?logo=openapiinitiative&logoColor=black)](docs/api/openapi.json)
+[![API](https://img.shields.io/badge/OpenAPI-123%20paths-85EA2D?logo=openapiinitiative&logoColor=black)](docs/api/openapi.json)
 [![license](https://img.shields.io/badge/license-proprietary-red)](packages/skillrouter-cli/package.json)
 
 [快速开始](#3-分钟跑起来) · [架构](#架构) · [端到端示例](#端到端一个能力从零到被-agent-调用) ·
@@ -97,7 +97,7 @@ flowchart LR
     API["API 服务<br/>FastAPI"]
     WK["Worker<br/>异步队列 / 租约 / 恢复"]
     GW["Agent 网关<br/>Node 22 边车"]
-    DB[("SQLite<br/>49 表 / 56 索引")]
+    DB[("SQLite<br/>51 表 / 60 索引")]
     VAULT["凭证保险箱<br/>AES-GCM 信封加密"]
   end
 
@@ -133,6 +133,8 @@ flowchart LR
 |---|---|---|
 | **Provider** | 提供商 | 上游服务的归属单位（`base_url`、分类、环境）。删除前必须先解除凭证与能力引用。 |
 | **Credential** | 凭证 | 加密存储的密钥 + 掩码 + 指纹。支持**检测有效性**（真实打上游探测）、**替换密文**、**轮换**（新建一行并原子切换引用）。 |
+| **Protocol** | 协议注册表 | 四种线协议预设：`openai`（Chat Completions + `/models`）、`anthropic`（Messages + `/v1/models`）、`google`（generateContent + `/v1beta/models`）、`custom`（自定义地址 + 可选线协议 + 路径/认证覆盖）。地址拼接、认证头、取模型路径**只在后端一处**定义，前端只渲染 `GET /api/admin/llm/protocols`。 |
+| **Model Catalog** | 模型清单缓存 | 一次「获取模型」把上游返回的四种形状归一化成 `{id, display_name, kind, recommended}`，落 `llm_model_catalog` 做 **TTL 缓存**（默认 600s）+ 上游失败时**降级**展示 24h 内旧清单（`source=cache-stale` + `warning`），没有旧值才 503。 |
 | **Capability** | 能力 | 对外契约：`key` + 输入/输出 JSON Schema + 调用模式 + 示例 + `routes[]`。**四个状态彼此独立**：已保存 / 测试通过 / 已发布 / 可调用。 |
 | **Route** | 通道 | 能力在某个提供商上的实现：`url_template`、参数映射、响应映射、错误映射、限额、超时重试、优先级。 |
 | **SKILL** | 分发单元 | 能力组合 + 执行计划 + 权限声明，版本化发布；**已发布**决定版本，**已启用**决定当前是否对外可见 —— 两者独立。 |
@@ -338,17 +340,17 @@ curl -sS -X POST "$SR_BASE/api/v1/capabilities/text.generate.echo/invoke" \
 
 | 套件 | 命令 | 结果 |
 |---|---|---|
-| 后端全量 | `cd apps/api && python -m pytest tests -q` | **285 passed**（31 个文件） |
+| 后端全量 | `cd apps/api && python -m pytest tests -q` | **372 passed**（35 个文件） |
 | Agent 网关 | `cd agents/aragon-gateway && npx vitest run` | **53 passed**（5 个文件） |
 | npm CLI | `cd packages/skillrouter-cli && npx vitest run` | **37 passed**（3 个文件） |
-| 浏览器 e2e（有头 Chrome） | `cd apps/web && npx playwright test --headed` | **11 passed / 2 skipped**（真实模型 2 条需 `SR_LIVE_AGENT=1`） |
+| 浏览器 e2e（有头 Chrome） | `cd apps/web && npx playwright test --headed` | **11 passed / 2 skipped**（真实模型 2 条需 `SR_LIVE_AGENT=1`；本轮新增 `llm-config.spec.ts` 5 条需 `SR_E2E_ADMIN_USER/PASSWORD` 登录，实测 5/5 见 [`§14.5.5`](docs/runbook/verification-report.md)） |
 | 前端类型 / lint / 构建 | `npx tsc --noEmit` / `npx next lint` / `npm run build` | 0 错误 / 0 warning / 构建成功 |
 | 端到端真联调 | `python scripts/e2e_live.py` | **70/70**（真实 uvicorn + 真实 HTTP 上游 + 真实 CLI 安装与调用） |
 | 网关联通 | `python scripts/check_gateway.py` | **12/12**（真实网关进程 + 引擎 0.2.34 + 热切换） |
 | 前端联通 | `python scripts/check_web.py` | **9/9**（Next 反代、X-Request-Id、未登录 401） |
-| 迁移 | `python -m alembic -c migrations/alembic.ini upgrade head` | 49 表 / 56 索引 / 2 触发器，`user_version=2` |
+| 迁移 | `python -m alembic -c migrations/alembic.ini upgrade head` | 51 表 / 60 索引 / 2 触发器，`user_version=3` |
 
-合计 **386 项测试通过**（285 + 53 + 37 + 11），2 项按设计跳过。
+合计 **473 项测试通过**（372 + 53 + 37 + 11），2 项按设计跳过。
 GitHub Actions 上 9 个作业全绿（`e2e (optional)` 按设计跳过，不计入通过）。
 完整命令与输出归档在 [`docs/runbook/verification-report.md`](docs/runbook/verification-report.md)，
 逐项验收状态以 [`verification-checklist.md`](docs/runbook/verification-checklist.md) 为**唯一权威**。
@@ -395,7 +397,7 @@ apps/api/                     FastAPI 服务（api 与 worker 共用镜像）
     worker/                   队列、租约、恢复、handlers
     upgrade/                  引擎检测 → 隔离构建 → 验证 → 热切换 → 回滚
   migrations/                 Alembic
-  tests/                      pytest：单元 / 契约 / 集成（31 文件 / 285 项）
+  tests/                      pytest：单元 / 契约 / 集成（35 文件 / 372 项）
 apps/web/                     Next.js 15 控制台（20 个页面，standalone 输出，/api 反代）
   e2e/                        Playwright：核心闭环 + 浮窗 Agent + 有头巡检
 agents/aragon-gateway/        Node 22 边车：引擎宿主 + 12 个 sr_* 工具 + 事件流
@@ -425,6 +427,7 @@ start.ps1 / stop.ps1          Windows 一键起停（四进程 + 就绪探测 + 
 | 排查报错 | [`docs/runbook/troubleshooting.md`](docs/runbook/troubleshooting.md)（错误码 → 原因 → 处置） |
 | 核对验收 | [`docs/runbook/verification-checklist.md`](docs/runbook/verification-checklist.md) |
 | 读设计契约 | [`docs/plans/skill-router/spec.md`](docs/plans/skill-router/spec.md)（v2.0，3300+ 行，实现以它为准） |
+| 配 LLM 上游（四协议 / 实时测试 / 取模型） | [`docs/plans/llm-provider-config/spec.md`](docs/plans/llm-provider-config/spec.md)（契约）+ [`docs/api/examples.md`](docs/api/examples.md) §10（curl / TS）+ `python scripts/check_llm_protocols.py`（无密钥也能验的四协议矩阵） |
 | 了解实现与 spec 的差异 | [`docs/plans/skill-router/implementation-notes.md`](docs/plans/skill-router/implementation-notes.md) |
 
 文档索引总入口：[`docs/README.md`](docs/README.md)。

@@ -1,5 +1,5 @@
 -- Skill Router 初始 schema 快照（与 Alembic 0001_init 对齐，便于人工审阅）
--- user_version=2；alembic_version=['0003_iteration2']
+-- user_version=3；alembic_version=['0004_llm_config']
 -- 权威来源：apps/api/migrations/versions/0001_init.py。本文件只读，不参与迁移。
 
 CREATE TABLE admin_sessions (
@@ -439,6 +439,45 @@ CREATE TABLE idempotency_keys (
 	PRIMARY KEY (id)
 );
 
+CREATE TABLE llm_connection_probes (
+          id              TEXT PRIMARY KEY,
+          credential_id   TEXT NULL,
+          provider_id     TEXT NULL,
+          protocol        TEXT NOT NULL,
+          wire            TEXT NOT NULL,
+          base_url        TEXT NOT NULL,
+          model_id        TEXT NULL,
+          mode            TEXT NOT NULL,
+          ok              INTEGER NOT NULL DEFAULT 0,
+          stages          TEXT NOT NULL DEFAULT '[]',
+          http_status     INTEGER NULL,
+          latency_ms      INTEGER NULL,
+          error_code      TEXT NULL,
+          detail_redacted TEXT NULL,
+          actor_id        TEXT NULL,
+          request_id      TEXT NULL,
+          at              TEXT NOT NULL
+        );
+
+CREATE TABLE llm_model_catalog (
+          id                  TEXT PRIMARY KEY,
+          dedupe_key          TEXT NOT NULL UNIQUE,
+          credential_id       TEXT NULL,
+          provider_id         TEXT NULL,
+          protocol            TEXT NOT NULL,
+          wire                TEXT NOT NULL,
+          base_url            TEXT NOT NULL,
+          models              TEXT NOT NULL DEFAULT '[]',
+          model_count         INTEGER NOT NULL DEFAULT 0,
+          truncated           INTEGER NOT NULL DEFAULT 0,
+          source              TEXT NOT NULL DEFAULT 'upstream',
+          fetched_at          TEXT NOT NULL,
+          expires_at          TEXT NOT NULL,
+          last_error_redacted TEXT NULL,
+          created_at          TEXT NOT NULL,
+          updated_at          TEXT NOT NULL
+        );
+
 CREATE TABLE login_attempts (
 	id VARCHAR(64) NOT NULL, 
 	username VARCHAR(64) NOT NULL, 
@@ -766,6 +805,10 @@ CREATE INDEX ix_files_owner ON file_objects (owner_type, owner_id);
 CREATE INDEX ix_files_sha ON file_objects (sha256);
 CREATE INDEX ix_idem_expires ON idempotency_keys (expires_at);
 CREATE INDEX ix_idem_state ON idempotency_keys (state, expires_at);
+CREATE INDEX ix_llm_catalog_cred ON llm_model_catalog(credential_id);
+CREATE INDEX ix_llm_catalog_exp ON llm_model_catalog(expires_at);
+CREATE INDEX ix_llm_probe_at ON llm_connection_probes(at);
+CREATE INDEX ix_llm_probe_cred ON llm_connection_probes(credential_id, at);
 CREATE INDEX ix_login_attempts_ip ON login_attempts (ip, at);
 CREATE INDEX ix_login_attempts_user ON login_attempts (username, at);
 CREATE INDEX ix_skills_status ON skills (status, enabled);

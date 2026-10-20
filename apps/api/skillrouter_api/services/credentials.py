@@ -48,6 +48,8 @@ _PUBLIC_META_KEYS = (
     "header_name",       # executors/auth.py
     "username",          # executors/auth.py（basic 认证用户名，非密钥）
     "mock",              # scripts/seed_demo.py（演示数据标记）
+    "llm_protocol",      # iter3：LLM 协议规范（openai/anthropic/google/custom），非密钥
+    "api_version",       # iter3：Azure 类端点的 api-version，非密钥
     "model", "region", "notes", "base_url_hint",   # 预留：UI 未来可填，当前无人写
 )
 
@@ -56,21 +58,31 @@ _SENSITIVE_META = re.compile(r"(?i)(secret|token|passw|signature|webhook|api[_-]
 #: 公开别名（`scripts/migrate_seal_meta.py` 与测试复用同一份判据，避免出现第二套正则）
 SENSITIVE_META = _SENSITIVE_META
 
+#: **无论名字是否命中正则**都必须密封的键（iter3 / spec §3.3）
+#: `extra_headers` 的值可能是第二种密钥，而上面的正则匹配不到它；
+#: 不显式登记就会以明文进 `row.meta` 并随 `_brief()` 出到列表响应里。
+_ALWAYS_SEALED = frozenset({"extra_headers", "proxy_authorization"})
+
 #: `meta_sealed` 的 AAD 固定值（与 `crypto/secretbox.py` 顶部登记表一致）
 _META_RECORD_TYPE = "credential_meta"
 
 
 def _partition_meta(meta: dict | None) -> tuple[dict, dict]:
-    """按 `_SENSITIVE_META` 把 meta 分成（可明文存储, 需密封）两份。
+    """按 `_SENSITIVE_META` + `_ALWAYS_SEALED` 把 meta 分成（可明文存储, 需密封）两份。
 
     `probe_path` / `probe_method` / `header_name` / `username` / `mock` 都不命中
     正则，因此不会被密封（密封它们会让探测与认证直接失效）。
+    `extra_headers` / `proxy_authorization` 名字本身不敏感，但值可能是密钥，
+    因此由 `_ALWAYS_SEALED` 强制密封（spec §3.3）。
     """
     public: dict = {}
     sensitive: dict = {}
     for key, value in (meta or {}).items():
         name = str(key)
-        (sensitive if _SENSITIVE_META.search(name) else public)[name] = value
+        if name in _ALWAYS_SEALED or _SENSITIVE_META.search(name):
+            sensitive[name] = value
+        else:
+            public[name] = value
     return public, sensitive
 
 
@@ -309,7 +321,35 @@ def update_credential(credential_id: str, patch: dict, *, actor: str | None = No
             if sensitive_meta:
                 row.meta_sealed = _merge_sealed_meta(row.meta_sealed, row.id, sensitive_meta)
         row.updated_at = now_iso()
+    # 目录失效必须覆盖「凭证写路径」（spec §3.5 / R-11）：改了协议/地址/认证方式后，
+    # 旧清单就是别人的清单，不能等前端/脚本自己叫 refresh。
+    if _catalog_affected_by_patch(patch):
+        invalidate_catalog(credential_id)
     return get_credential(credential_id)
+
+
+#: 一次 `PATCH /credentials/{id}` 里会改变「模型清单归属」的键
+_CATALOG_AFFECTING_KEYS = ("auth_type", "header_name", "kind")
+
+
+def _catalog_affected_by_patch(patch: dict) -> bool:
+    if any(key in patch and patch[key] is not None for key in _CATALOG_AFFECTING_KEYS):
+        return True
+    meta = patch.get("meta") or {}
+    return any(key in meta for key in ("llm_protocol", "llm_paths", "api_version", "extra_headers"))
+
+
+def invalidate_catalog(credential_id: str) -> None:
+    """清掉该凭证的模型清单缓存（失败不影响主流程；缓存只是加速）。"""
+    from .llm import catalog as llm_catalog
+
+    try:
+        llm_catalog.invalidate(credential_id)
+    except Exception as exc:  # noqa: BLE001 - 缓存清理失败不能把写路径拖红
+        log.warning(
+            "llm_catalog_invalidate_failed",
+            extra={"object": credential_id, "detail": redact(str(exc))},
+        )
 
 
 def set_status(credential_id: str, status: str, *, actor: str | None = None) -> dict:
@@ -328,6 +368,7 @@ def set_status(credential_id: str, status: str, *, actor: str | None = None) -> 
         summary={"status": status},
         actor_id=actor,
     )
+    invalidate_catalog(credential_id)
     return get_credential(credential_id)
 
 
@@ -350,6 +391,7 @@ def replace_secret(credential_id: str, secret: str, *, actor: str | None = None)
         summary={"masked": mask_secret(secret)},
         actor_id=actor,
     )
+    invalidate_catalog(credential_id)
     return get_credential(credential_id)
 
 
@@ -408,6 +450,9 @@ def rotate(credential_id: str, secret: str, *, name: str | None = None, actor: s
         summary={"rotation_of": credential_id, "routes": len(routes)},
         actor_id=actor,
     )
+    # 旧行被停用、新行是新身份：两条的清单缓存都必须清（spec §3.5）
+    invalidate_catalog(credential_id)
+    invalidate_catalog(new_id)
     return get_credential(new_id)
 
 
@@ -466,8 +511,14 @@ def delete(credential_id: str, *, actor: str | None = None) -> dict:
     return {"ok": True, "id": credential_id}
 
 
-def materialize(credential_id: str) -> dict:
-    """凭证代理：只在请求发出的瞬间解封，作用域仅本次调用（D5 / §11.2）。"""
+def materialize(credential_id: str, *, include_sealed: bool = False) -> dict:
+    """凭证代理：只在请求发出的瞬间解封，作用域仅本次调用（D5 / §11.2）。
+
+    `include_sealed=True` 时把 `meta_sealed` 里的敏感键解封并合进 `meta`
+    （LLM 探测与轮次注入需要 `extra_headers` / `api_version`）。
+    默认 `False` 保持既有调用点（`credentials_verify` / `executors` / `api/v1/callbacks`）
+    的行为**完全不变**（spec §3.3）。
+    """
     with db_session() as s:
         row = s.get(Credential, credential_id)
         if row is None or row.deleted_at:
@@ -476,21 +527,28 @@ def materialize(credential_id: str) -> dict:
             raise ApiError(
                 Code.CREDENTIAL_DISABLED,
                 message=f"凭证状态为 {row.status}，无法调用",
-                details={"credential_id": credential_id},
+                hint="在凭证页启用它，或替换/轮换一把新密钥",
+                details={"credential_id": credential_id, "status": row.status},
             )
         provider = s.get(Provider, row.provider_id)
         secret = secretbox.open_sealed(
             row.secret_ciphertext, record_type="credential", record_id=row.id
         )
+        meta = dict(row.meta or {})
+        if include_sealed:
+            meta.update(_sealed_meta(row))
         return {
             "credential_id": row.id,
+            "credential_name": row.name,
+            "secret_mask": row.secret_mask,
             "provider_id": row.provider_id,
             "provider_slug": provider.slug if provider else None,
+            "provider_name": provider.name if provider else None,
             "base_url": provider.base_url if provider else None,
             "kind": row.kind,
             "auth_type": row.auth_type,
             "header_name": row.header_name,
-            "meta": row.meta or {},
+            "meta": meta,
             "secret": secret,
         }
 
@@ -598,6 +656,7 @@ __all__ = [
     "summarize",
     "sealed_meta_of",
     "migrate_meta",
+    "invalidate_catalog",
     "SENSITIVE_META",
     "log",
 ]

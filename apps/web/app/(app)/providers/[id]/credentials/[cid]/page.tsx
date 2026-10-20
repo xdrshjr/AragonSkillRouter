@@ -9,6 +9,8 @@ import { DangerConfirm } from '@/components/common/DangerConfirm';
 import { EmptyState } from '@/components/common/EmptyState';
 import { PageHeader } from '@/components/common/PageHeader';
 import { StatusBadge } from '@/components/common/StatusBadge';
+import { LLM_STAGE_LABELS } from '@/components/llm/ConnectionTester';
+import { ProbeHistory } from '@/components/llm/ProbeHistory';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog';
@@ -18,7 +20,29 @@ import { useToast } from '@/components/ui/toast';
 import { apiDelete, apiGet, apiPost, describeError, isApiError } from '@/lib/api';
 import { formatDateTime, formatDuration, formatRelative, prettyJson } from '@/lib/format';
 import { queryKeys } from '@/lib/query';
-import type { Credential, CredentialImpact, CredentialVerification } from '@/lib/types';
+import type { Credential, CredentialImpact, CredentialVerification, LlmStageResult } from '@/lib/types';
+
+/**
+ * `POST /admin/credentials/{id}/verify` 的响应（spec §5.7：在原字段上增加
+ * `protocol` / `resolved_url` / `stage` / `model_count`）。
+ * 字段全部可选：后端若只回 `verification_id`（异步），这里就只显示「已提交」，
+ * 不假装拿到了阶段结果。真实的阶段明细也可以从 `GET /llm/probes` 的历史里读到。
+ */
+interface CredentialVerifyResult {
+  verification_id?: string;
+  ok?: boolean;
+  protocol?: string;
+  resolved_url?: string;
+  stage?: string;
+  model_count?: number | null;
+  /** `record_verification()` 的返回键就是 `status_code`（HTTP 状态码） */
+  status_code?: number | null;
+  latency_ms?: number | null;
+  error_code?: string | null;
+  detail_redacted?: string | null;
+  hint?: string | null;
+  stages?: LlmStageResult[];
+}
 
 /**
  * 凭证详情（spec §8.4）：掩码、验证历史、影响面、替换 / 轮换 / 启停 / 删除。
@@ -35,6 +59,8 @@ export default function CredentialDetailPage() {
   const [rotateOpen, setRotateOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [secretDraft, setSecretDraft] = React.useState('');
+  /** 「重新探测」返回的阶段结果（spec §5.7）；没有就是还没测过 */
+  const [verifyResult, setVerifyResult] = React.useState<CredentialVerifyResult | null>(null);
 
   const credential = useQuery<Credential>({
     queryKey: queryKeys.credentials.detail(credentialId),
@@ -69,11 +95,15 @@ export default function CredentialDetailPage() {
   };
 
   const verify = useMutation({
-    mutationFn: async () => apiPost<{ verification_id: string }>(`/admin/credentials/${credentialId}/verify`, {}),
+    mutationFn: async () =>
+      apiPost<CredentialVerifyResult>(`/admin/credentials/${credentialId}/verify`, {}),
     onSuccess: async (data) => {
+      setVerifyResult(data);
       toast({
-        title: '已触发有效性检测',
-        description: `检测任务 ${data.verification_id} 已提交（异步）。`,
+        title: data.protocol ? `已按协议重新探测（${data.protocol}）` : '已触发有效性检测',
+        description: data.verification_id
+          ? `检测任务 ${data.verification_id} 已提交。`
+          : '结果见下方「协议与重新探测」。',
         tone: 'info',
       });
       await invalidate();
@@ -179,6 +209,15 @@ export default function CredentialDetailPage() {
   // meta 投影：只展示白名单键的键值；被剔除/密封的键只给键名（spec §A.3.2）
   const publicMetaKeys = Object.keys(data.meta ?? {});
   const metaRedactedKeys = data.meta_redacted_keys ?? [];
+  /** 协议感知凭证的协议与 api-version（`_PUBLIC_META_KEYS` 可明文键，spec §3.3.1） */
+  const llmProtocol =
+    typeof data.meta?.llm_protocol === 'string' && data.meta.llm_protocol.trim() !== ''
+      ? String(data.meta.llm_protocol)
+      : null;
+  const llmApiVersion =
+    typeof data.meta?.api_version === 'string' && data.meta.api_version.trim() !== ''
+      ? String(data.meta.api_version)
+      : null;
 
   const impactedCapabilities = impact.data?.capabilities ?? [];
   const impactedSkills = impact.data?.skills ?? [];
@@ -202,6 +241,16 @@ export default function CredentialDetailPage() {
             <Badge tone="outline" mono>
               {data.secret_mask}
             </Badge>
+            {llmProtocol ? (
+              <Badge tone="info" mono>
+                协议 {llmProtocol}
+              </Badge>
+            ) : null}
+            {llmApiVersion ? (
+              <Badge tone="outline" mono>
+                api-version {llmApiVersion}
+              </Badge>
+            ) : null}
             {data.last_verify_ok !== null ? (
               <Badge tone={data.last_verify_ok ? 'ok' : 'danger'} dot>
                 {data.last_verify_ok ? '最近验证通过' : '最近验证失败'}
@@ -218,7 +267,7 @@ export default function CredentialDetailPage() {
               onClick={() => verify.mutate()}
               icon={<ShieldCheck size={16} strokeWidth={1.75} />}
             >
-              检测有效性
+              重新探测
             </Button>
             <Button variant="secondary" size="sm" onClick={() => setReplaceOpen(true)} icon={<KeyRound size={16} strokeWidth={1.75} />}>
               替换密文
@@ -241,6 +290,105 @@ export default function CredentialDetailPage() {
         }
       />
 
+      {/* 协议感知探测（spec §5.7）：meta 里的协议 + 「重新探测」的阶段结果 + 最近探测历史 */}
+      <section aria-label="协议与重新探测" className="sr-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-16 font-semibold text-content">协议与重新探测</h2>
+          <div className="flex flex-wrap items-center gap-1">
+            <Badge tone={llmProtocol ? 'info' : 'neutral'} dot>
+              {llmProtocol ? `协议 ${llmProtocol}` : '未声明协议'}
+            </Badge>
+            {llmApiVersion ? (
+              <Badge tone="outline" mono>
+                api-version {llmApiVersion}
+              </Badge>
+            ) : null}
+          </div>
+        </div>
+        <p className="mt-0.5 text-12 text-content-muted">
+          协议来自凭证的 <code className="sr-mono">meta.llm_protocol</code>
+          （未声明时后端会按提供商名推断）。「重新探测」对 llm 类凭证走协议感知的模型清单探测，不计费。
+        </p>
+
+        {verifyResult ? (
+          <div className="mt-2 rounded border border-border bg-surface p-2" aria-live="polite">
+            <p className="flex flex-wrap items-center gap-2 text-12">
+              <Badge tone={verifyResult.ok === false ? 'danger' : verifyResult.ok ? 'ok' : 'info'} dot>
+                {verifyResult.ok === false ? '探测失败' : verifyResult.ok ? '探测通过' : '已提交'}
+              </Badge>
+              {verifyResult.protocol ? (
+                <Badge tone="outline" mono>
+                  {verifyResult.protocol}
+                </Badge>
+              ) : null}
+              {verifyResult.error_code ? (
+                <Badge tone="danger" mono>
+                  {verifyResult.error_code}
+                </Badge>
+              ) : null}
+              {verifyResult.verification_id ? (
+                <code className="sr-mono break-all text-content-muted">{verifyResult.verification_id}</code>
+              ) : null}
+            </p>
+            {verifyResult.resolved_url ? (
+              <p className="mt-1 break-all text-12 text-content-muted">
+                实际请求地址：<code className="sr-mono text-content">{verifyResult.resolved_url}</code>
+              </p>
+            ) : null}
+            {verifyResult.stages && verifyResult.stages.length > 0 ? (
+              <ul className="mt-1 flex flex-col gap-1">
+                {verifyResult.stages.map((stage, index) => (
+                  <li
+                    key={`${stage.stage}-${index}`}
+                    className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-12"
+                  >
+                    <span className="min-w-[104px] text-content">
+                      {LLM_STAGE_LABELS[stage.stage] ?? stage.stage}
+                    </span>
+                    <Badge tone={stage.ok ? 'ok' : 'danger'}>{stage.ok ? '通过' : '失败'}</Badge>
+                    <span className="text-content-muted">
+                      HTTP {stage.http_status ?? '—'} · {formatDuration(stage.latency_ms)}
+                    </span>
+                    {stage.model_count !== undefined && stage.model_count !== null ? (
+                      <span className="text-content-muted">{stage.model_count} 个模型</span>
+                    ) : null}
+                    {stage.detail ? (
+                      <span className="basis-full break-words text-content-muted">{stage.detail}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : verifyResult.stage || verifyResult.model_count !== undefined ? (
+              <p className="mt-1 flex flex-wrap items-baseline gap-x-2 text-12 text-content-muted">
+                <span className="min-w-[104px] text-content">
+                  {LLM_STAGE_LABELS[verifyResult.stage ?? ''] ?? verifyResult.stage ?? '阶段'}
+                </span>
+                <span>HTTP {verifyResult.status_code ?? '—'}</span>
+                <span>· {formatDuration(verifyResult.latency_ms)}</span>
+                {verifyResult.model_count !== undefined && verifyResult.model_count !== null ? (
+                  <span>· 识别到 {verifyResult.model_count} 个模型</span>
+                ) : null}
+              </p>
+            ) : null}
+            {verifyResult.hint ? (
+              <p className="mt-1 text-12 text-content-muted">下一步：{verifyResult.hint}</p>
+            ) : null}
+            {verifyResult.detail_redacted ? (
+              <p className="mt-1 break-words text-12 text-content-muted">
+                {verifyResult.detail_redacted}
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <p className="mt-2 text-13 text-content-muted">
+            还没有本次探测结果。点上方「重新探测」跑一次真实请求（鉴权阶段不计费）；历史记录见下方。
+          </p>
+        )}
+
+        <div className="mt-3 border-t border-border pt-3">
+          <ProbeHistory limit={5} credentialId={data.id} />
+        </div>
+      </section>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <section aria-label="基本信息" className="sr-card p-4">
           <h2 className="text-16 font-semibold text-content">基本信息</h2>

@@ -167,12 +167,16 @@ async def archive(session_id: str, ctx: SessionContext = Depends(require_passwor
 @router.get("/config")
 async def get_config(ctx: SessionContext = Depends(require_password_changed)) -> dict:
     from ...agent import toolspec
+    from ...services.llm import protocols as llm_protocols
 
     resolution = agent_model.resolve()
     return {
         "model": settings_service.agent_config(),
         "effective": resolution.as_dict(),
         "providers": list(agent_model.PROVIDER_IDS),
+        # 协议注册表（INV-1：前端不得硬编码协议差异）
+        "protocols": llm_protocols.public_catalog(),
+        "wires": list(llm_protocols.WIRE_KEYS),
         "tools": toolspec.TOOL_SPECS,
         "policy": settings_service.read_agent_policy(),
     }
@@ -185,19 +189,66 @@ async def patch_config(payload: dict, ctx: SessionContext = Depends(require_pass
     只写白名单键：过去这里把任意 dict 直接落库，`credential_id` 打错、`provider`
     写成 `zhipu` 都能存进去，错误要等到发消息时才以「网关拒绝」的形式出现。
     """
+    from ...services.llm import catalog as llm_catalog
+    from ...services.llm import protocols as llm_protocols
+
+    before = agent_model.resolve()
     cleaned = agent_model.validate_patch(payload)
     model = settings_service.update_agent_config(cleaned, actor=ctx.admin_id)
     resolution = agent_model.resolve()
+    # 地址/协议/凭证变了 → 旧模型清单就是「别人的清单」。
+    # 失效放在后端的写路径里，不依赖前端叫 refresh（curl / CLI / 脚本都不会叫）。
+    if any(key in cleaned for key in ("protocol", "provider", "wire", "base_url", "credential_id")):
+        for candidate in (before, resolution):
+            llm_catalog.invalidate_by_target(
+                candidate.protocol,
+                candidate.wire,
+                (candidate.model or {}).get("baseUrl") or "",
+            )
     return {
         "model": model,
         "effective": resolution.as_dict(),
+        "protocols": llm_protocols.public_catalog(),
     }
 
 
 @router.post("/config/test")
-async def test_config(ctx: SessionContext = Depends(require_password_changed)) -> dict:
-    """真实打一次模型（最小请求），把结果作为「Agent 可用」的证据。"""
-    return await agent_model.check()
+async def test_config(
+    payload: dict | None = None, ctx: SessionContext = Depends(require_password_changed)
+) -> dict:
+    """真实打一次模型（最小请求），把结果作为「Agent 可用」的证据。
+
+    可选 body（`protocol` / `model` / `mode`）只用于覆盖本次测试，
+    **不改**已保存配置；缺省 `mode="completion"`，与改动前的行为逐字节等价
+    （今天这个端点就是一次生成请求，先插一个 GET 会让「不实现 /models 的网关」从可用变成不可用）。
+    白名单外的键一律 `VALIDATION_FAILED`：静默丢弃参数会让调用方以为它生效了。
+    """
+    overrides = dict(payload or {})
+    unknown = sorted(set(overrides) - {"protocol", "model", "mode"})
+    if unknown:
+        raise ApiError(
+            Code.VALIDATION_FAILED,
+            message=f"该端点不支持这些字段：{', '.join(unknown)}",
+            hint="本端点固定为一次生成请求（mode=completion）；auth / both 请用 /api/admin/llm/test-connection",
+            details={"allowed": ["protocol", "model", "mode"]},
+        )
+    mode = str(overrides.get("mode") or "completion").strip().lower()
+    if mode != "completion":
+        raise ApiError(
+            Code.VALIDATION_FAILED,
+            message="本端点的 mode 只能是 completion",
+            hint="要只拉模型清单（不计费）或两阶段都跑，请用 /api/admin/llm/test-connection",
+            details={"field": "mode", "allowed": ["completion"]},
+        )
+    config = None
+    if overrides.get("protocol") or overrides.get("model"):
+        current = dict(settings_service.get_value("agent_model", {}) or {})
+        if overrides.get("protocol"):
+            current["protocol"] = str(overrides["protocol"]).strip().lower()
+        if overrides.get("model"):
+            current["model"] = str(overrides["model"]).strip()
+        config = current
+    return await agent_model.check(config)
 
 
 @router.post("/connectivity")

@@ -19,6 +19,7 @@
 | 了解实现与 spec 的差异 | [plans/skill-router/implementation-notes.md](plans/skill-router/implementation-notes.md) | 逐节映射 + 已实现/部分/未实现/待验证 + 偏差解释 |
 | 装桌面端（Electron，免 Python / 免 Node） | [../apps/desktop/README.md](../apps/desktop/README.md) · [plans/desktop-electron/spec.md](plans/desktop-electron/spec.md) · [runbook/desktop-app.md](runbook/desktop-app.md) | 出包（`npm run dist:win`）、产物路径、双击验收、数据目录与备份、桌面端错误码（`E-D01`~`E-D07` / `W-D01` / `W-D06`） |
 | 读设计契约 | [plans/skill-router/spec.md](plans/skill-router/spec.md) | v2.0，3300+ 行，实现以它为准 |
+| 配 LLM 上游（openai / anthropic / google / 自定义） | [plans/llm-provider-config/spec.md](plans/llm-provider-config/spec.md) | v2.0 契约：四协议注册表、实时连通测试（草稿也能测）、一键取模型 + TTL 缓存/降级；验收命令 `python scripts/check_llm_protocols.py` |
 | 查上游 AragonAgent 事实 | [plans/skill-router/aragonagent-upstream.md](plans/skill-router/aragonagent-upstream.md) | 实测记录与能力边界 |
 
 ## 文档清单

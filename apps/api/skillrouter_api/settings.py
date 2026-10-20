@@ -80,6 +80,18 @@ class Settings(BaseSettings):
     #: 平台令牌是否允许放进查询串（`?token=`）；默认关闭，`[compat]` 逃生阀（§A.3.3）
     allow_query_token: bool = False
 
+    # LLM 服务配置（spec §4.2）
+    #: `auth` 阶段（只拉模型清单）的超时：20s 足够，且让「key 错」快速给结论
+    llm_probe_timeout_s: float = 20.0
+    #: `completion` 阶段的超时：45s，**沿用** `agent_model.PROBE_TIMEOUT_S`。
+    #: 思考型模型（glm / o1）在 20s 内可能只吐了思考、没吐正文，压到 20s 会让既有
+    #: `POST /agent/config/test` 出现新超时失败（INV-4 回归）。
+    llm_completion_timeout_s: float = 45.0
+    #: 模型清单缓存 TTL（秒），范围 60–86400
+    llm_catalog_ttl_s: int = 600
+    #: 同一探测身份的限流配额（次/60 秒）；进程内 token bucket
+    llm_probe_rate_per_min: int = 10
+
     # CLI / 安装
     install_mode: str = "tarball"  # tarball | npm
     cli_package_version: str = "0.1.0"

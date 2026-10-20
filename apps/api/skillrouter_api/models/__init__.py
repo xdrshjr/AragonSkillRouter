@@ -35,6 +35,7 @@ from .execution import (
     TaskQueue,
     UsageRecord,
 )
+from .llm import LlmConnectionProbe, LlmModelCatalog
 from .providers import Credential, CredentialVerification, Provider
 from .skills import Skill, SkillExport, SkillFile, SkillImport, SkillVersion
 from .system import (
@@ -54,6 +55,8 @@ __all__ = [
     "Provider",
     "Credential",
     "CredentialVerification",
+    "LlmConnectionProbe",
+    "LlmModelCatalog",
     "Capability",
     "CapabilityRoute",
     "CapabilityVersion",

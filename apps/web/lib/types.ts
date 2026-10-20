@@ -1073,3 +1073,215 @@ export interface TableQuery {
   q: string;
   [key: string]: string | number | boolean | undefined;
 }
+
+/* ── LLM 协议 / 探测 / 模型目录（spec §3.8、§5.1–5.6） ──
+ *
+ * INV-1：前端**不硬编码**协议差异。这里的 `protocol` / `wire` / `auth_style`
+ * 一律用 string 承载，取值与含义全部来自 `GET /api/admin/llm/protocols`。
+ * 任何「anthropic 用 /v1/models」这类知识都不许出现在前端。
+ */
+
+/** 探测模式：`auth` 不计费（只拉清单）/ `completion` 计费 1 次 / `both` 先鉴权再生成 */
+export type LlmProbeMode = 'auth' | 'completion' | 'both';
+
+/** 阶段名（后端 `services/llm/probe.py`）：auth = 拉模型清单，completion = 最小生成 */
+export type LlmStageName = 'auth' | 'completion';
+
+/** 协议路径覆盖（仅 `custom` 生效；未给则继承所选 wire） */
+export interface LlmPaths {
+  models?: string | null;
+  chat?: string | null;
+}
+
+/**
+ * `GET /api/admin/llm/protocols` 的单条协议（前端**唯一**的协议知识来源）。
+ *
+ * 注意 `custom`：`wire` / `models_path` / `chat_path` 都是 `null` ——
+ * 表示「路径继承所选线协议」，**不是**「没有模型清单」（`supports_models_list` 仍为 true）。
+ */
+export interface LlmProtocolSpec {
+  key: string;
+  /** 英文名（代码 / 日志用） */
+  label: string;
+  /** 界面文案 */
+  label_zh: string;
+  /** 卡片一句话 */
+  one_liner: string;
+  /** 网关 providerId；`null` = 由用户选线协议（custom） */
+  wire: string | null;
+  /** 空串表示必须用户自己填写（custom） */
+  default_base_url: string;
+  base_url_hint: string;
+  docs_url: string;
+  auth_styles: string[];
+  default_auth_style: string;
+  models_path: string | null;
+  chat_path: string | null;
+  supports_models_list: boolean;
+  /** `true` 时上面两个路径由所选 wire 决定（后端 `effective_paths()` 现算） */
+  paths_inherit_from_wire?: boolean;
+  /** 续页方式：`null` / `anthropic_after_id` / `google_next_page_token` */
+  paginate?: string | null;
+}
+
+export interface LlmProtocolsResponse {
+  items: LlmProtocolSpec[];
+  /** 可作为 `wire` 的三值；custom 才用得上 */
+  wires: string[];
+}
+
+/** `POST /api/admin/llm/test-connection` 与 `POST /api/admin/llm/models` 的请求体 */
+export interface LlmProbeTarget {
+  protocol: string;
+  /** 与 `secret` 二选一；给了它就忽略 `secret` */
+  credential_id?: string | null;
+  /** 草稿密钥：只在本次请求内存里存在，不回显、不落库 */
+  secret?: string | null;
+  base_url?: string | null;
+  auth_style?: string | null;
+  header_name?: string | null;
+  extra_headers?: Record<string, string>;
+  query_params?: Record<string, string>;
+  /** 仅 custom 生效；未给则继承所选 wire */
+  paths?: LlmPaths | null;
+  /** 仅 custom；默认 openai */
+  wire?: string | null;
+  /** mode 含 completion 时必填 */
+  model?: string | null;
+  mode?: LlmProbeMode;
+  /** 草稿保存时建议的凭证名（只用于回显建议，不落库） */
+  credential_name?: string | null;
+}
+
+/** 一次探测里的单个阶段（`detail` 已由后端脱敏） */
+export interface LlmStageResult {
+  stage: string;
+  ok: boolean;
+  http_status: number | null;
+  latency_ms: number | null;
+  detail: string | null;
+  /** auth 阶段：识别到的模型数 */
+  model_count?: number | null;
+  /** completion 阶段：探测用的模型 */
+  model?: string | null;
+  /** completion 阶段：回话字符数 */
+  text_chars?: number | null;
+}
+
+/** 探测响应里回显的凭证（只有掩码，永无明文） */
+export interface LlmProbeCredential {
+  id: string;
+  name: string;
+  provider_id?: string | null;
+  provider_name?: string | null;
+  secret_mask: string | null;
+}
+
+/**
+ * `POST /api/admin/llm/test-connection` 的响应（spec §3.4）。
+ *
+ * 「正常的坏结果」（上游 401/403/超时）**不抛 HTTP 错误**，而是 `ok=false` +
+ * `error_code` + `hint`；只有请求本身不成立或凭证不可用才走 4xx/5xx（抛 ApiError）。
+ */
+export interface LlmProbeResponse {
+  ok: boolean;
+  protocol: string;
+  wire: string | null;
+  base_url?: string | null;
+  resolved_url: string | null;
+  mode: LlmProbeMode | string;
+  stages: LlmStageResult[];
+  probe_id: string | null;
+  checked_at: string | null;
+  /** 失败时的机器码（`UPSTREAM_AUTH` / `UPSTREAM_TIMEOUT` …），成功时为 null */
+  error_code?: string | null;
+  /** 失败时的人话下一步 */
+  hint?: string | null;
+  problems: string[];
+  credential?: LlmProbeCredential | null;
+  /** 协议族是不是由提供商名推断出来的 */
+  inferred?: boolean;
+  /** 归一化提示（如「已去掉重复的 /v1」） */
+  notes?: string[];
+}
+
+/** 模型目录里的一项（后端归一化后的形状） */
+export interface LlmModelEntry {
+  id: string;
+  display_name: string;
+  /** chat | embedding | audio | image | rerank | other */
+  kind: string;
+  recommended: boolean;
+  context_window: number | null;
+  methods?: string[];
+  created_at?: string | null;
+  owned_by?: string | null;
+}
+
+/** `POST /api/admin/llm/models` / `GET /api/admin/credentials/{id}/models` 的响应 */
+export interface LlmModelsResponse {
+  items: LlmModelEntry[];
+  count: number;
+  /** upstream | cache | cache-stale（cache-stale = 上游抖动时的降级读旧值） */
+  source: string;
+  fetched_at: string | null;
+  expires_at: string | null;
+  truncated: boolean;
+  probe_id?: string | null;
+  notes?: string[];
+  /** 降级时的说明（「上游暂时不可用，展示的是 12 分钟前的清单」） */
+  warning?: string | null;
+}
+
+/** `GET /api/admin/llm/probes` 的列表项：**已含完整 `stages`**（无详情端点） */
+export interface LlmProbeHistoryItem {
+  id: string;
+  protocol: string;
+  wire: string | null;
+  base_url: string | null;
+  mode: string;
+  ok: boolean;
+  stages: LlmStageResult[];
+  http_status: number | null;
+  latency_ms: number | null;
+  error_code: string | null;
+  detail_redacted: string | null;
+  credential_id: string | null;
+  at: string;
+}
+
+export type LlmProbeHistoryResponse = Paginated<LlmProbeHistoryItem>;
+
+/* ── `/agent/config` 的 `effective`（spec §5.6） ──────── */
+
+/** 网关 `model{providerId,modelId,baseUrl?}`；`providerId` 是 **wire**，不是 protocol */
+export interface AgentEffectiveModelRef {
+  providerId: string;
+  modelId: string;
+  baseUrl?: string;
+}
+
+/** 生效引用的凭证摘要（只有掩码） */
+export interface AgentEffectiveCredential {
+  id: string;
+  name: string;
+  provider_id?: string | null;
+  provider_name: string | null;
+  secret_mask: string | null;
+}
+
+/**
+ * `GET/PATCH /api/admin/agent/config` 的 `effective`。
+ * `problems` 非空时**不得**显示「就绪」；`warnings` 只是提示，不阻塞。
+ */
+export interface AgentEffective {
+  ready: boolean;
+  protocol?: string | null;
+  wire?: string | null;
+  model: AgentEffectiveModelRef | null;
+  credential_refs: Record<string, string>;
+  credential: AgentEffectiveCredential | null;
+  problems: string[];
+  warnings?: string[];
+  notes?: string[];
+}

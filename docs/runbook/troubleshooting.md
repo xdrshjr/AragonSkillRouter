@@ -187,6 +187,47 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm \
 退出码 `3` 意味着**当前模型的表结构与这个库对不上**（例如中间版本改过列）。这时不要强行 stamp：
 要么先用备份恢复到一致版本，要么按差异手工补 SQL，再重试。
 
+### 5.3 LLM 协议探测（`/api/admin/llm/*`）：本轮新增的 2 个错误码
+
+四协议（`openai` / `anthropic` / `google` / `custom`）的连通测试、取模型、探测历史都走
+`services/llm/probe.py`。**先记住一条口径**：上游鉴权失败、上游 500、超时这类「正常的坏结果」
+返回的是 `200 + ok:false + error_code + hint`（页面渲染人话），**不是** HTTP 错误码。
+只有「请求本身不成立」「凭证不能用」「自己把自己限流了」才走下面这张表。
+
+| 错误码 | HTTP | 含义 / 原因 | 立刻做什么 |
+|---|---|---|---|
+| `LLM_PROTOCOL_UNSUPPORTED` | 400 | 请求里的 `protocol` 不在 `openai` / `anthropic` / `google` / `custom` 四个值内：拼错（`open-ai`）、用了旧前端的自由字符串（`provider=zhipu`）、或前端自己硬编码了协议清单 | 取值一律来自 `GET /api/admin/llm/protocols` 的 `items[].key`；响应 `details.allowed` 会列出允许值。前端**不要**硬编码四张卡片，它就是从注册表渲染的（改协议只改后端一处） |
+| `LLM_PROBE_THROTTLED` | 429 | 同一探测身份 60 秒内超过 `SKILLROUTER_LLM_PROBE_RATE_PER_MIN`（默认 **10**）次。身份= 已保存凭证的 `credential_id`，或草稿的 `sha256(protocol\|base_url)[:12]` | 等 `details.retry_after_s` 秒再点；「测试连接」与「获取模型列表」**共用**这条配额，连点/双击很容易撞上（并发同一个身份本来会被单飞合并，超限的是次数不是并发）。确需更高频就调大该变量；限流是**进程内** token bucket，多副本部署时每个副本各有一份配额（跨进程精确配额仍是待验证项） |
+
+### 5.4 LLM 探测语境下的既有错误码
+
+这 5 个码在别处已经存在（§2/§3/§5），但在「配 LLM」这条路上它们各自代表一件**很具体**的事，
+而且处置完全不同——照 `code` 分支，不要照文案猜：
+
+| 错误码 | HTTP | 在 LLM 探测里的具体样子 | 立刻做什么 |
+|---|---|---|---|
+| `CREDENTIAL_DISABLED` | 409 | 用 `credential_id` 测试时，那张凭证不是 `active`（被停用、过期或被轮换替换掉）。`materialize()` 直接抛，探测根本不会发出去 | 到凭证页把它启用，或改用替换后的新凭证；**不要**把它当成「上游挂了」 |
+| `UPSTREAM_AUTH` | 502（`200+ok:false` 时是结论码，不是 HTTP 码） | 上游回 401/403。最常见三种：密钥不属于该项目、密钥没启用该 API（如 Generative Language API）、认证头位置错了（Anthropic 要 `x-api-key`，Google 要 `x-goog-api-key`，OpenAI 兼容网关要 `Authorization: Bearer`） | 看 `stages[].detail` 里的脱敏原文与 `hint`；确认协议选对（把 Anthropic 网关当 openai 会得到一模一样的 401）。`custom` 协议还要确认 `auth_style` 与 `header_name` |
+| `UPSTREAM_INVALID_RESPONSE` | 502 | 上游回了 200，但响应里没有模型数组（`data` / `models` / `items` / `result.data` 都没有），或完成态响应不是该协议的完成结构。典型原因：`base_url` 多了/少了版本段（`/v1`、`/v1beta`）、路径被网关改写、走错线协议 | 先看 `resolved_url`（实际请求的地址）对不对；`custom` 检查 `wire` 与 `paths` 覆盖；不支持 `/models` 的网关直接手填模型名，别反复重试 |
+| `UPSTREAM_UNAVAILABLE` | 503 | 连不上：DNS/连接被拒/TLS 失败，或直连回退一次后仍失败；`POST /llm/models` 在**没有任何可降级旧清单**时也回这个码（`details.upstream` 给脱敏摘要） | 检查地址与网络；本机/内网目标不走代理（`netpolicy` 决定 `trust_env`），公网目标才走企业代理并在失败后直连重试一次。上游抖动期间「取模型」会优先降级到 `cache-stale`（200 + `warning`），看到 503 说明连 24h 内的旧值都没有 |
+| `SSRF_BLOCKED` | 400 | 地址不是 `http(s)`、缺主机名，或命中**云元数据地址**（`netpolicy.METADATA_HOSTS` / `METADATA_IPS`，硬编码拒绝）。管理员配置的上游**允许私网与回环**（`validate_admin_target` 只做这两条判断），所以被拒的通常是元数据地址或少了 `http://` | 补全 scheme 与主机名；把元数据地址换成真实上游地址。**不要**为了「能连内网」去改 `SKILLROUTER_SSRF_DENY`（它管的是抓取/执行侧，不是这里）；本机自测指向 `127.0.0.1` 的假上游是允许的 |
+
+不复现页面也能拿到证据（推荐排查顺序）：
+
+```bash
+# 1) 直接打一次探测（绕过前端，排除表单值问题）
+curl -sS -b cookies.txt -X POST "http://127.0.0.1:8000/api/admin/llm/test-connection" \
+  -H "Content-Type: application/json" -H "X-CSRF-Token: <csrf>" \
+  -d '{"protocol":"anthropic","secret":"<草稿密钥>","base_url":"https://api.anthropic.com","mode":"auth"}'
+
+# 2) 探测历史：每阶段的 http_status / latency_ms / 脱敏 detail 都在（没有明文密钥）
+curl -sS -b cookies.txt "http://127.0.0.1:8000/api/admin/llm/probes?page_size=5"
+
+# 3) 无第三方密钥也能验四协议矩阵（本地假上游 + 真实 uvicorn；落 var/reports/llm-protocols.md）
+python scripts/check_llm_protocols.py
+python scripts/check_llm_protocols.py --only anthropic --auth-401   # 401 时应得 UPSTREAM_AUTH + 提到 API key
+```
+
 ## 6. SKILL 与分发
 
 | 错误码 | HTTP | 含义 | 立刻做什么 |

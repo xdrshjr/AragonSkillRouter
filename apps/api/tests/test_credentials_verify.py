@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
 import httpx
 
-from tests.fixtures.fake_upstream import FakeUpstream, patch_httpx
+from tests.fixtures.fake_upstream import FakeLlmUpstream, FakeUpstream, patch_httpx
 
 
 def _create(client, admin, provider, *, secret="sk-probe-value-1234") -> str:
@@ -122,3 +124,111 @@ def test_verify_unknown_credential(client, admin) -> None:
     r = client.post("/api/admin/credentials/crd_missing/verify", headers=admin["headers"])
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+# ── T-28：llm 凭证改成协议感知探测（spec §3.7）────────────────
+def _llm_credential(client, admin, *, protocol: str, base_url: str) -> str:
+    """建一个「没有 probe_path」的 llm 凭证：它的探测必须由协议注册表决定。"""
+    slug = f"llm-{protocol}-{os.urandom(3).hex()}"
+    r = client.post(
+        "/api/admin/providers",
+        headers=admin["headers"],
+        json={"slug": slug, "name": f"LLM {protocol}", "category": "llm", "base_url": base_url},
+    )
+    assert r.status_code == 201, r.text
+    provider_id = r.json()["id"]
+    r = client.post(
+        f"/api/admin/providers/{provider_id}/credentials",
+        headers=admin["headers"],
+        json={
+            "name": f"{protocol} 凭证",
+            "kind": "llm",
+            "auth_type": "api_key",
+            "secret": "sk-verifysecret0123456",
+            "meta": {"llm_protocol": protocol},
+        },
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def test_llm_credential_verify_uses_protocol_aware_endpoint(client, admin, monkeypatch) -> None:
+    """Anthropic 凭证必须打 `GET /v1/models?limit=1000`，而不是 `GET /models`。
+
+    改前：`PROBES["llm"] = GET {base}/models` → 404 → 有效凭证被误判为无效。
+    改后：协议注册表给出 `/v1/models` + `anthropic-version` → 200 → 判有效。
+    """
+    upstream = FakeLlmUpstream(protocol="anthropic", model_ids=["claude-sonnet-4-5"])
+
+    def factory(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return _real_client(*args, **kwargs)
+
+    original = httpx.AsyncClient
+
+    def _real_client(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        kwargs["transport"] = upstream.mock
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    credential_id = _llm_credential(client, admin, protocol="anthropic", base_url="http://127.0.0.1:9")
+    r = client.post(f"/api/admin/credentials/{credential_id}/verify", headers=admin["headers"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True, body
+    assert body["protocol"] == "anthropic"
+    assert body["stage"] == "auth"
+    assert body["model_count"] == 1
+    url = upstream.models_calls[0]["url"]
+    assert url.endswith("/v1/models?limit=1000"), url
+    assert upstream.models_calls[0]["headers"].get("anthropic-version") == "2023-06-01"
+
+
+def test_llm_credential_verify_reports_auth_failure(client, admin, provider, monkeypatch) -> None:
+    upstream = FakeLlmUpstream(protocol="anthropic", reject_auth=True)
+    original = httpx.AsyncClient
+
+    def factory(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        kwargs["transport"] = upstream.mock
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    credential_id = _llm_credential(client, admin, protocol="anthropic", base_url="http://127.0.0.1:9")
+    r = client.post(f"/api/admin/credentials/{credential_id}/verify", headers=admin["headers"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error_code"] == "UPSTREAM_AUTH"
+    assert body["status_code"] == 401
+
+
+def test_non_llm_credential_keeps_the_legacy_probe(client, admin, monkeypatch) -> None:
+    """非 llm 类别（image / video / …）行为**一字不动**：仍是 `GET {base}/models`。"""
+    upstream = FakeUpstream()
+    patch_httpx(monkeypatch, upstream)
+    slug = "img-provider-legacy"
+    r = client.post(
+        "/api/admin/providers",
+        headers=admin["headers"],
+        json={"slug": slug, "name": "Image", "category": "image", "base_url": "http://127.0.0.1:9"},
+    )
+    assert r.status_code == 201, r.text
+    provider_id = r.json()["id"]
+    r = client.post(
+        f"/api/admin/providers/{provider_id}/credentials",
+        headers=admin["headers"],
+        json={
+            "name": "image 凭证",
+            "kind": "image",
+            "auth_type": "bearer",
+            "secret": "sk-imgsecret012345",
+            "meta": {},
+        },
+    )
+    assert r.status_code == 201, r.text
+    credential_id = r.json()["id"]
+    upstream.push(200, {"data": [{"id": "img-model"}]})
+    r = client.post(f"/api/admin/credentials/{credential_id}/verify", headers=admin["headers"])
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert upstream.calls[-1]["url"].endswith("/models")
+    assert "protocol" not in r.json()

@@ -152,6 +152,28 @@ async def verification_history(
     return credentials.verification_history(credential_id, paging["page"], paging["page_size"])
 
 
+@router.get("/credentials/{credential_id}/models")
+async def credential_models(
+    credential_id: str,
+    protocol: str | None = None,
+    refresh: bool = False,
+    include_non_llm: bool = False,
+    limit: int = 500,
+    ctx: SessionContext = Depends(require_password_changed),
+) -> dict:
+    """`GET /api/admin/credentials/{id}/models`：选了已有凭证 → 立刻有模型清单（spec §5.4）。"""
+    from .llm import credential_models as list_credential_models
+
+    return await list_credential_models(
+        credential_id,
+        protocol=protocol,
+        refresh=refresh,
+        include_non_llm=include_non_llm,
+        limit=max(1, min(int(limit or 500), 500)),
+        actor=ctx.admin_id,
+    )
+
+
 @router.post("/credentials/{credential_id}/disable")
 async def disable_credential(credential_id: str, ctx: SessionContext = Depends(require_password_changed)) -> dict:
     return credentials.set_status(credential_id, "disabled", actor=ctx.admin_id)

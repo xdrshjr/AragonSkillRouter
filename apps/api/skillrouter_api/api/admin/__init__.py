@@ -10,6 +10,7 @@ from . import (
     calls,
     capabilities,
     engine,
+    llm,
     overview,
     providers,
     settings,
@@ -30,5 +31,6 @@ router.include_router(agent_chat.router)
 router.include_router(agentic_flow.router)
 router.include_router(engine.router)
 router.include_router(settings.router)
+router.include_router(llm.router)
 
 __all__ = ["router"]

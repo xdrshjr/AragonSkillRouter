@@ -92,6 +92,10 @@ class Code:
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     SSRF_BLOCKED = "SSRF_BLOCKED"
 
+    # LLM 服务配置（iter3：只新增这 2 个，其余复用上面的既有码）
+    LLM_PROTOCOL_UNSUPPORTED = "LLM_PROTOCOL_UNSUPPORTED"
+    LLM_PROBE_THROTTLED = "LLM_PROBE_THROTTLED"
+
 
 #: 启动期常量：只用于启动日志与退出码，**不进 HTTP 码表**（§A.3.8-4）
 MIGRATION_NOT_ADOPTED = "MIGRATION_NOT_ADOPTED"
@@ -161,6 +165,18 @@ REGISTRY: dict[str, tuple[int, str, bool, str]] = {
     Code.ENGINE_SWITCH_FAILED: (500, "引擎切换失败，已保持/恢复上一版本", False, "查看升级记录中的失败检查项"),
     Code.APPROVAL_REQUIRED: (409, "该操作需要管理员审批", False, "在 Agent 面板批准或拒绝该请求"),
     Code.SSRF_BLOCKED: (400, "目标地址被出站策略拒绝", False, "把地址加入白名单或改用公网地址"),
+    Code.LLM_PROTOCOL_UNSUPPORTED: (
+        400,
+        "不支持的 LLM 协议规范",
+        False,
+        "只支持 openai / anthropic / google / custom；由 GET /api/admin/llm/protocols 给出",
+    ),
+    Code.LLM_PROBE_THROTTLED: (
+        429,
+        "连接测试过于频繁",
+        True,
+        "等 details.retry_after_s 秒后重试；同一凭证的探测配额是 10 次/60 秒",
+    ),
 }
 
 

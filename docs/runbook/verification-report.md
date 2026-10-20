@@ -1093,3 +1093,414 @@ cd apps/web && npx tsc --noEmit               → 0 error
 cd apps/web && npx next lint                  → No ESLint warnings or errors
 cd packages/contracts && npm run gen:check    → 检查通过（api.d.ts 已随 openapi.json 重新生成）
 ```
+
+---
+
+## 14. LLM 服务配置（四协议 · 实时连通 · 一键取模型）
+
+对应契约：`docs/plans/llm-provider-config/spec.md` v2.0（§3.7 的改动前后对比、§7.2 的 E-01 / E-02）。
+口径不变：**本节只登记真的跑过的命令与输出**，跑不了的一律进 `### 14.4` 的待验证表，
+不因为「代码看起来对」升级成已验证。
+
+| 项 | 值 |
+|---|---|
+| 记录时间 | 2026-10-20（文档与脚本节点） |
+| 环境 | Windows 10.0.26200；Python 3.11.7；ruff 0.15.20；**无任何第三方 LLM 凭证** |
+| 结论 | 文档 + `scripts/check_llm_protocols.py` **已交付并自检通过**；四协议矩阵（E-01 / E-02）**待 `api/admin/llm.py` 合并后重跑**（卡点见 14.2 的逐字输出） |
+
+### 14.1 `credentials_verify` 的协议感知修复：改动前 / 改动后
+
+同一张 **Anthropic 凭证**（`base_url = https://api.anthropic.com`、`auth_type = api_key`、
+`meta.llm_protocol = anthropic`），点「检测」时发生了什么：
+
+| 环节 | 改动前（当前代码事实） | 改动后（spec §3.7 规定行为） |
+|---|---|---|
+| 取模型地址 | `GET {base_url}/models` → `https://api.anthropic.com/models`（`services/credentials_verify.py:19` 的 `PROBES["llm"]`；`_probe_for()` 只做 `{base_url}` 字符串替换） | `GET {base_url}/v1/models?limit=1000` → `https://api.anthropic.com/v1/models?limit=1000`（`services/llm/protocols.build_models_request()`；`anthropic` 的 `strip_version_suffix="v1"` + `models_path="/v1/models"`） |
+| 认证头 | 只有通用四形态（`api_key` → 固定头名），**没有** `anthropic-version` | `x-api-key: <secret>` + `anthropic-version: 2023-06-01`（`protocols.build_auth_headers()` 委托 `executors.auth` 后叠加协议级头） |
+| 上游响应 | `404`（路径不存在） | `200 {"data":[…],"has_more":false,"last_id":"…"}` |
+| 落库 / 结论 | `credential_verifications.ok = 0`，`detail_redacted` 记 404 → 页面「**无效**」 | `ok = 1` + `stage="auth"` + `model_count = N`，**不发计费请求** → 页面「**有效**」 |
+| 计费 | 0 次 | 0 次（`mode=auth`） |
+
+**这张表的证据等级（重要）**：
+
+- 「改动前」两行是**代码事实**，逐字读自 `apps/api/skillrouter_api/services/credentials_verify.py:18-35`，
+  不是推断；
+- 「改动后」两行是 spec 的**规定行为**，不是本机观测结果；
+- 本机**没有**任何真实 Anthropic key，所以「同一把钥匙 404 → 200」这条端到端对比**没有跑过**。
+  它的必备证据是 `apps/api/tests/test_credentials_verify.py` 的 T-28（断言请求的是 `/v1/models`
+  而不是 `/models`）——该用例未随本节点交付，状态 **待验证**。
+
+### 14.2 `scripts/check_llm_protocols.py`：命令与输出形状
+
+设计目标：**不依赖任何第三方凭证**也能证明「四协议各自打到正确的地址、带正确的认证头、
+能解析模型清单、能完成一次生成」。做法（脚本头部有完整说明）：4 个
+`http.server.ThreadingHTTPServer` 假上游（openai / anthropic / google / OpenAI 兼容的 custom 子路径网关）
++ 真实 uvicorn（临时 `SKILLROUTER_DATA_DIR` / `SKILLROUTER_DB_PATH`，不碰 `var/`）+ 真实管理端会话。
+
+```bash
+# E-01 全矩阵：4 协议 × 3 阶段（auth / completion / models），落 var/reports/llm-protocols.md
+python scripts/check_llm_protocols.py
+
+# E-02 变异：假上游一律回 401，断言结论是 UPSTREAM_AUTH 且 hint 提到「API key」
+python scripts/check_llm_protocols.py --only anthropic --auth-401
+```
+
+#### 14.2.1 本轮实测（逐字输出）
+
+```text
+$ python scripts/check_llm_protocols.py --only openai
+──────────────────────────────────────────────────────────────────────
+ LLM 四协议矩阵校验
+──────────────────────────────────────────────────────────────────────
+ 假上游 openai     http://127.0.0.1:61043
+ 假上游 anthropic  http://127.0.0.1:61044
+ 假上游 google     http://127.0.0.1:61045
+ 假上游 custom     http://127.0.0.1:61046/openai
+ ✓ bootstrap 初始化（临时库 C:\Users\…\Temp\sr-llm-mexu8bsz）
+ ✓ API 就绪 http://127.0.0.1:64165（真实 uvicorn 进程）
+ ✓ 管理端登录（首次登录已自动完成强制改密）
+ ✗ GET /api/admin/llm/protocols → HTTP 404 NOT_FOUND：检查标识是否正确
+ ✗ 后端新端点还没就绪（`apps/api/skillrouter_api/api/admin/llm.py`），
+   本脚本已按 spec 写好；等实现合并后直接重跑即可。
+
+$ echo %errorlevel%
+2
+```
+
+即：**假上游 → 真实 uvicorn → bootstrap → 登录 → CSRF → 探测端点** 这条链路的前半段已经通了，
+卡点只有一个——`/api/admin/llm/*` 那批端点还没合入（`GET /api/admin/llm/protocols` 直接 404）。
+脚本因此以退出码 **2**（环境不可用）收场，而不是把没跑的矩阵伪装成绿的。
+
+静态检查（同一份文件，实跑）：
+
+```text
+python -c "import ast; ast.parse(open('scripts/check_llm_protocols.py',encoding='utf-8').read())"
+                                                        → AST OK
+python scripts/check_llm_protocols.py --help            → 打印 usage，退出码 0
+python -m ruff check scripts/check_llm_protocols.py     → All checks passed!
+python -m ruff format --check scripts/check_llm_protocols.py → 1 file already formatted
+```
+
+> **既有基线（不是本轮引入）**：`python -m ruff format --check scripts` 在今天这个仓库里本来就会报
+> 13 个脚本「would reformat」——`scripts/` 下没有自己的 ruff 配置，ruff 按默认 88 列判定，
+> 而现有脚本是 100 列风格。`make lint-py` 的第二步因此本来就对 `scripts/` 红。
+> 本轮新增的脚本按**默认配置**格式化（88 列），所以它自己那一份是干净的；重排 13 个既有脚本
+> 超出本轮范围，未动。
+
+#### 14.2.2 假上游形状自检（14 项全过，临时脚本在 `%TEMP%`，不属于仓库）
+
+在端点未就绪前先把「值得怀疑的部分」单独验一遍：假上游会不会因为自己写错而让矩阵变成假绿。
+
+```text
+$ python %TEMP%\check_fakes.py
+ PASS openai GET /v1/models
+ PASS openai 缺 Bearer → 401
+ PASS openai POST chat
+ PASS anthropic 第一页 has_more=true
+ PASS anthropic 第二页 has_more=false
+ PASS anthropic POST /v1/messages
+ PASS anthropic 缺 max_tokens → 400
+ PASS anthropic 缺 anthropic-version → 400
+ PASS google GET /v1beta/models
+ PASS google generateContent
+ PASS google 缺 x-goog-api-key → 401
+ PASS custom GET /openai/models
+ PASS custom POST /openai/chat/completions
+ PASS 变异模式 anthropic 回 401
+ALL PASS
+```
+
+#### 14.2.3 判定逻辑自检（20 项全过，同样是 `%TEMP%` 里的临时脚本）
+
+矩阵的「绿/红」由判定函数决定，所以先把它们拿 spec §3.4 / §5.3 的样例响应钉一遍
+（含反例：判定函数不许把坏结果放过去）。摘录：
+
+```text
+ PASS auth 成功 → ok
+ PASS 通过但零上游请求 → 抓假成功（INV-2）
+ PASS 短路时 completion 行判失败并说明          # auth 失败 → completion「未执行」
+ PASS 变异：200+ok=false+UPSTREAM_AUTH+hint(API key) → 通过
+ PASS 变异：hint 不含 API key → 判失败          # E-02 的判据就是这句
+ PASS 变异：401 却判通过 → 抓假成功
+ PASS anthropic 未续页 → 判失败                 # 只请求 1 次即判红（T-19）
+ PASS refresh 未绕过缓存 → 判失败
+ PASS models 503 → 判失败并带状态码
+ PASS 报告含 request_id / 通过计数 / 待验证段
+ALL PASS
+```
+
+#### 14.2.4 期望的输出形状（**尚未实测**，不是结果）
+
+端点就绪后，全矩阵会打印并落 12 行（4 协议 × 3 阶段），形状如下（`var/reports/llm-protocols.md`）：
+
+| 协议 | 阶段 | 端点 | 结论 | HTTP | 模型数 | 上游请求 | 耗时 (ms) | request_id | 备注 |
+|---|---|---|---|---|---|---|---|---|---|
+| `openai` | `auth` | `POST /llm/test-connection` | ✓ | 200 | ≥1 | 1 | … | `…` | `resolved_url` = `…/v1/models` |
+| `openai` | `completion` | `POST /llm/test-connection` | ✓ | 200 | — | 1 | … | `…` | `…/v1/chat/completions` |
+| `openai` | `models` | `POST /llm/models` | ✓ | 200 | ≥1 | 1 | … | `…` | `source=upstream` |
+| `anthropic` | `auth` | `POST /llm/test-connection` | ✓ | 200 | ≥1 | 2（`has_more` 续页） | … | `…` | `…/v1/models?limit=1000` |
+| `anthropic` | `completion` | `POST /llm/test-connection` | ✓ | 200 | — | 1 | … | `…` | `…/v1/messages`（带 `max_tokens`） |
+| `anthropic` | `models` | `POST /llm/models` | ✓ | 200 | ≥1 | ≥2 | … | `…` | 未续页即判失败（spec §3.5 / T-19） |
+| `google` | `auth` | `POST /llm/test-connection` | ✓ | 200 | ≥1 | 1 | … | `…` | `…/v1beta/models?pageSize=1000` |
+| `google` | `completion` | `POST /llm/test-connection` | ✓ | 200 | — | 1 | … | `…` | `…/v1beta/models/{model}:generateContent` |
+| `google` | `models` | `POST /llm/models` | ✓ | 200 | ≥1 | 1 | … | `…` | `source=upstream` |
+| `custom` | `auth` | `POST /llm/test-connection` | ✓ | 200 | ≥1 | 1 | … | `…` | `wire=openai` → `…/openai/models` |
+| `custom` | `completion` | `POST /llm/test-connection` | ✓ | 200 | — | 1 | … | `…` | `…/openai/chat/completions` |
+| `custom` | `models` | `POST /llm/models` | ✓ | 200 | ≥1 | 1 | … | `…` | `source=upstream` |
+
+变异模式（E-02）只有 1 行（`--only anthropic`）：期望 `200 + ok:false`、`error_code=UPSTREAM_AUTH`、
+`hint` 里出现「API key」。
+
+> 上表是**契约形状**（每行该有什么、判定阈值是什么），不是本次结果。真跑绿之后要把逐行
+> `request_id` 与耗时替换成实际值，并删掉这行说明。
+
+### 14.3 本轮实际交付的文件
+
+| 文件 | 动作 |
+|---|---|
+| `scripts/check_llm_protocols.py` | 新增（4 假上游 + 真实 uvicorn + 4×3 矩阵 + `--only` / `--auth-401` / `--mutate-auth` + Markdown 证据表 + 显式退出码 0/1/2） |
+| `docs/api/examples.md` | 新增 §10：5 个端点的 curl / TS / JSON 示例（含一条 `ok:false` 失败样例） |
+| `docs/runbook/troubleshooting.md` | 新增 §5.3（2 个新码）、§5.4（LLM 语境下的 5 个既有码）+ 三条取证命令 |
+| `docs/runbook/verification-report.md` | 本节（§14） |
+| `deploy/.env.example` | 新增 4 个变量（`SKILLROUTER_LLM_PROBE_TIMEOUT_S` / `_COMPLETION_TIMEOUT_S` / `_CATALOG_TTL_S` / `_PROBE_RATE_PER_MIN`，留空=默认 20 / 45 / 600 / 10） |
+| `docs/README.md`、`README.md` | 文档地图各新增一行；`README.md` 的「核心概念」新增 `Protocol` / `Model Catalog` 两行 |
+
+### 14.4 状态口径（已实现 vs 待验证）
+
+> **更新（实现节点）**：本节 14.4 保留了文档/脚本节点当时的真实状态（后端尚未合并）。
+> 后端与前端合并后的重跑证据在 **§14.5**；凡是 §14.5 已给出命令+输出的条目，
+> 以 §14.5 为准，下表相应行已标注「→ §14.5」。
+
+**已实现（本轮有命令与输出）**
+
+| 项 | 证据 |
+|---|---|
+| `scripts/check_llm_protocols.py` 本体：4 个假上游、真实 uvicorn 启动、临时库 bootstrap、管理端登录/强制改密、Markdown 证据表、`--only` / `--auth-401`、退出码 0/1/2 | §14.2.1 的逐字输出（`--help` 退出 0；当时卡在新端点 404 → 退出码 2，符合设计） |
+| 四种协议形状的假上游（anthropic `has_more` 分页、`max_tokens` 必填、`x-api-key` + `anthropic-version`、`x-goog-api-key`、Bearer） | §14.2.2 的 14 项自检全过 |
+| 判定函数（成功 / 失败 / 短路 / 假成功 / 变异 hint / 未续页 / 缓存未绕过 / 503 / 报告渲染） | §14.2.3 的 20 项自检全过（用 spec §3.4 / §5.3 的样例响应） |
+| 上表 §14.3 的 6 个文档改动 | 文件本身（`ruff` 与 Markdown 结构在 §14.2.1 有静态检查） |
+
+**待验证（不许写成「已验证」）**
+
+| 项 | 为什么 |
+|---|---|
+| ~~四协议 × 三阶段矩阵 12 行全绿（E-01）~~ | → §14.5.1：**已重跑，12/12 全绿** |
+| ~~401 变异断言（E-02）~~ | → §14.5.2：**已重跑，1/1 符合预期** |
+| ~~`credentials_verify` 改成协议感知（§14.1 的「改动后」）~~ | → §14.5.3：T-28 已交付并绿；真实 Anthropic key 仍无 |
+| 真实上游凭证矩阵（Anthropic `/v1/models` 分页、Google `pageSize`、vLLM / One-API / LiteLLM） | 本机无第三方 key（与 spec §10 一致） |
+| 多 worker 部署下的探测限流精度 | 限流是进程内 token bucket（前提：单 uvicorn 进程），无压测输出 |
+| `custom + wire=anthropic` 的真实网关 | 本脚本的 custom 行是 OpenAI 兼容网关（`wire=openai`）；anthropic 兼容网关组合未验证 |
+| 桌面端 18100 下的全流程 | 需出包后真机双击（`npm run smoke`），本轮无桌面端改动 |
+
+### 14.5 实现节点补充证据（后端 + 前端合并后重跑）
+
+| 项 | 值 |
+|---|---|
+| 记录时间 | E-01/E-02：`2026-10-20T09:48Z`（脚本报告头部自带 UTC 时间）；E-04/E-05：同日同一会话内（逐字输出见下） |
+| 环境 | Windows 10.0.26200；Python 3.11.7；Node 22 + Next 15.5.7；Playwright 1.64.1 + **系统 Chrome**（`SR_E2E_CHANNEL=chrome`）；**无任何第三方 LLM 凭证** |
+
+#### 14.5.1 E-01 四协议 × 三阶段矩阵（真实 uvicorn，12/12）
+
+```text
+$ python scripts/check_llm_protocols.py
+ ✓ bootstrap 初始化（临时库 C:\Users\…\Temp\sr-llm-c6rkh1ti）
+ ✓ API 就绪 http://127.0.0.1:52111（真实 uvicorn 进程）
+ ✓ 管理端登录（首次登录已自动完成强制改密）
+ ✓ GET /api/admin/llm/protocols 可达（协议注册表已实现）
+
+ ✓ [openai]    auth       HTTP 200 · 2 个模型 · 上游 1 次 · 622ms · request_id=a9605b4517f24736
+ ✓ [openai]    completion HTTP 200 · 上游 1 次 · 315ms · request_id=b9b31ec4a6f94eac
+ ✓ [openai]    models     HTTP 200 · 1 个模型 · 上游 1 次 · 283ms · request_id=40409a3142134235
+ ✓ [anthropic] auth       HTTP 200 · 2 个模型 · 上游 2 次 · 595ms · request_id=96b4f0b7de9545d7
+ ✓ [anthropic] completion HTTP 200 · 上游 1 次 · 325ms · request_id=26588e4416d240ca
+ ✓ [anthropic] models     HTTP 200 · 2 个模型 · 上游 2 次 · 600ms · request_id=17a776a17bbe4016
+ ✓ [google]    auth       HTTP 200 · 2 个模型 · 上游 1 次 · 326ms · request_id=19a9ec8f59ca4955
+ ✓ [google]    completion HTTP 200 · 上游 1 次 · 298ms · request_id=c767ea6997a342e5
+ ✓ [google]    models     HTTP 200 · 1 个模型 · 上游 1 次 · 301ms · request_id=a25067b1131f4935
+ ✓ [custom]    auth       HTTP 200 · 2 个模型 · 上游 1 次 · 264ms · request_id=c9ff1416ab2f4bd2
+ ✓ [custom]    completion HTTP 200 · 上游 1 次 · 295ms · request_id=68a0077ca0f14f27
+ ✓ [custom]    models     HTTP 200 · 1 个模型 · 上游 1 次 · 287ms · request_id=5f06538505e74a6b
+
+ LLM 协议矩阵：12/12 行通过
+ 证据已写入 M:\takoAI\AragonSkillRouter\var\reports\llm-protocols.md
+```
+
+关键行解读（都是「地址拼对了吗」的直接证据）：
+
+- `anthropic` 的 `resolved_url = http://…/v1/models?limit=1000` 且上游 2 次 → 走的是 `has_more` 续页；
+- `google` 的 `resolved_url = …/v1beta/models?pageSize=1000`；
+- `custom` 的 `resolved_url = …/openai/models`（子路径网关，wire=openai）。
+
+#### 14.5.2 E-02 401 变异（true 上游拒绝）
+
+```text
+$ python scripts/check_llm_protocols.py --only openai --auth-401
+ ✓ [openai] auth HTTP 200 · 上游 1 次 · 771ms · request_id=13768a0779074b24
+   备注：UPSTREAM_AUTH · hint: 上游拒绝鉴权：检查 API key 是否属于该项目，或该 key 是否启用了对应 API
+ 变异断言：1/1 行符合预期（UPSTREAM_AUTH + hint 提到 API key）
+```
+
+注意 HTTP 是 **200** 而不是 5xx —— 这正是 spec §5.2 的约定：鉴权失败是「正常的坏结果」，
+`200 + ok=false + error_code + hint`；只有请求本身不成立才走 4xx/5xx。
+
+#### 14.5.3 `credentials_verify` 协议感知：T-28 与真实请求路径
+
+```text
+$ cd apps/api && python -m pytest tests/test_credentials_verify.py -q
+............                                                             [100%]
+```
+
+`test_llm_credential_verify_uses_protocol_aware_endpoint` 断言（拿假 Anthropic 上游）：
+
+- 请求 URL 以 `/v1/models?limit=1000` 结尾（**不是** `/models`）；
+- 请求头带 `anthropic-version: 2023-06-01`；
+- 响应 `ok=true`、`stage="auth"`、`model_count=1`、`protocol="anthropic"`。
+
+即 §14.1 的「改动后」列已从「spec 规定」升级为「有断言守住的实现」。
+**仍未验证**：真实 Anthropic key 的 404 → 200 对比（本机无 key）。
+
+#### 14.5.4 E-04 前端联通（Next 反代 → FastAPI，含新端点）
+
+```text
+$ python scripts/check_web.py
+ ✓ web /api/health
+ ✓ 登录页渲染
+ ✓ 强制改密页渲染
+ ✓ Next.js /api 反代到 FastAPI（bootstrap）
+ ✓ bootstrap 返回契约字段
+ ✓ /api/v1/health 经反代可用
+ ✓ 反代透传 X-Request-Id
+ ✓ 反代透传 X-Frame-Options
+ ✓ 未登录访问管理接口经反代返回 401
+
+ 前端联通性：9/9 项通过
+```
+
+#### 14.5.5 E-05 浏览器用例（Playwright + 系统 Chrome，5/5）
+
+```text
+$ npx playwright test e2e/llm-config.spec.ts        # SR_E2E_CHANNEL=chrome
+Running 5 tests using 1 worker
+  ok 1 … ① 切 4 个协议卡片：地址联动、方向键、切协议清空模型 (4.9s)
+  ok 2 … ② 草稿密钥：测试连接出 auth 阶段，测试生成（计费 1 次）出 completion 阶段，且保存按钮变成跳凭证抽屉 (4.5s)
+  ok 3 … ③ 获取模型 → 选择 → 保存 → 就绪徽标 (4.8s)
+  ok 4 … ④ 失败态：整页只有 1 个 role="alert"，且文案含处置建议与 request_id (4.6s)
+  ok 5 … data-theme="dark" 下 ①②③ 仍达标 (5.2s)
+  5 passed (26.4s)
+```
+
+前提与限制（必须如实登记）：
+
+- `npx playwright install chromium` 在本机**装不上**（`cdn.playwright.dev` TLS 被重置），
+  所以走 `SR_E2E_CHANNEL=chrome` 用**系统 Chrome**；`playwright.config.ts` 早已支持这个兜底；
+- 上游 LLM 调用由 `page.route()` 桩掉（用例不需要任何真实 key），但**登录、页面 SSR、
+  Next 反代、`/api/admin/agent/config` 的真实形状**都是真的；
+- 既有 4 个 spec 同时重跑（INV-4）：`5 passed / 4 skipped / 0 failed`
+  （skip 的是既有的「需要真实模型/真实 Agent」用例，与基线口径一致）。
+
+#### 14.5.6 后端全量回归
+
+```text
+$ cd apps/api && python -m pytest tests -q
+372 passed
+$ python -m ruff check apps/api scripts       → All checks passed!
+$ cd apps/api && python -m mypy skillrouter_api → Success: no issues found in 147 source files
+```
+
+基线 285 → **372**（新增 87 条），DoD 门槛 `≥343` 满足。
+
+> `python -m ruff format --check apps/api` 在**本仓库基线上本来就不绿**（109 个既有文件
+> 「would reformat」）。本轮只保证**新增文件**格式干净（`ruff format` 已对
+> `services/llm/*`、`schemas/llm.py`、`models/llm.py`、`api/admin/llm.py`、`tests/test_llm_*.py`、
+> `tests/fixtures/fake_upstream.py` 跑过），未重排既有文件——见 spec
+> `## 实施过程发现的方案缺陷` 的 D-6。
+
+---
+
+## 15. 终审复审节点（review / commit，round 1）
+
+| 项 | 值 |
+|---|---|
+| 记录时间 | 2026-10-20（复审节点，同一台机器、同一份工作副本） |
+| 环境 | Windows 10.0.26200；Python 3.11.7；Node 22 + Next 15.5.7；ruff 0.15.20；mypy（现有非 strict 配置）；**无任何第三方 LLM 凭证** |
+| 结论 | 覆盖度对齐 spec §4 的三张清单（22 个新增 + 29 个改动，逐个核对存在性，**0 缺失**），外加 2 个清单外但必需的改动（`api/admin/providers.py` 挂 §5.4 的路由、`tests/conftest.py` 的夹具熵，见 spec D-13）；DoD 里的 `grep` 项逐条复核通过（`apps/web` 无 `if protocol ==`；`services/llm/**` 无自造认证头、`trust_env` 只出现在 `netpolicy` 判据之后；`credential_refs[` 只允许 `wire` 下标）；发现并**当场修掉** 1 个 P0（「起不来」级）+ 5 个 P1 + 13 个 P2（共 19 条，见 15.1），随后全门重跑绿（15.2） |
+
+### 15.1 复审发现并已修复的问题
+
+| # | 严重度 | 位置 | 问题（用户 / 维护者可见后果） | 修法 |
+|---|---|---|---|---|
+| R-1 | **P0（启动失败）** | `deploy/.env.example` | 四个 `SKILLROUTER_LLM_*` **数值**变量留空，注释还写「留空即用默认值」。实测 `SKILLROUTER_LLM_PROBE_TIMEOUT_S=` → `ValidationError: Input should be a valid number … input_value=''`，API / Worker **起不来**（`settings.py` 没有 `env_ignore_empty`） | 模板直接写默认值 `20 / 45 / 600 / 10`，并加一行说明「数值变量不能留空」；登记为 spec D-10 |
+| R-2 | P1 | `providers/[id]/page.tsx` + `components/llm/useLlmDraft.ts` | 抽屉里采集的 `wire` / 路径覆盖**从不落库**（`meta` 只写 `llm_protocol` + `base_url_hint`），探测请求也带不上（`buildProbeTarget` 只认 `pathsModels`，RHF 给的是 `paths_models`）。后果：`custom` 配的线协议与路径覆盖永远不生效 | 落库 `meta.llm_wire` / `meta.llm_paths`（后端 `identity` 读的就是这两个键），并让 `buildProbeTarget` 认 snake_case |
+| R-3 | P1 | `providers/[id]/credentials/[cid]/page.tsx` | 「重新探测」读 `http_status`，后端返回 `status_code` → HTTP 列恒为「—」（鉴权失败这种最需要看状态码的场景）；阶段时间线读 `stages`，该端点从不返回 → 死代码 | 前端改读 `status_code`；后端 `_verify_llm()` 增补 `stages`（只增不改），时间线变成真数据；登记为 spec D-12 |
+| R-4 | P1 | `apps/web/e2e/llm-config.spec.ts` + `settings/agent/page.tsx` | 页面 ③ 的外层 `section` 与 `ConnectionTester` 内部**同名** `region[实时验证]`，Playwright 的 `name` 是子串匹配 → 解析成 2 个节点，`tester()` 一调用就 strict mode violation，E-05 的 4 条用例全红 | 去掉页面外层的重复 `aria-label`（同名 region 本来也没有语义收益） |
+| R-5 | P1 | `components/llm/ModelPicker.tsx` | 输入即写父级：已选 `gpt-4o-mini` → 打 `claude` 想搜一下 → 按 Esc 放弃 → `values.model` 已被静默改成 `claude`，点保存就 PATCH 上去 | `close(commit)`：点选 / Enter / 失焦才提交，**Esc 丢弃**；输入只改本地草稿 |
+| R-6 | P1 | `api/admin/agent_chat.py::test_config` | docstring 写着支持可选 body `protocol/model/mode`，代码把 `mode` 收下就**静默忽略**（白名单外的键同理）→ 调用方以为生效 | 白名单校验（`protocol/model/mode`），`mode != completion` 明确 400 并指向 `/api/admin/llm/test-connection` |
+| R-7 | P2 | `tests/fixtures/fake_upstream.py` | CLI 的 `--models` / `--reject-auth` 收进 `argparse` 后没传给服务实例：`--reject-auth` 会**照常回 200** —— 一个专门用来证明「鉴权失败」的开关静默失效 | `_serve(..., model_ids=, reject_auth=)` 接通；命令补 `cd apps/api`（spec D-11） |
+| R-8 | P2 | `scripts/check_llm_protocols.py` | ① 变异 / `--only` 运行会**覆盖**全矩阵报告；② completion 行的备注写的是「取清单地址」而不是上游真正收到的请求（等于没证明生成地址）；③ 响应里缺该阶段时只跳过断言、仍判绿；④ 临时数据目录从不清理；⑤ 没有「报告不含草稿密钥」的自检 | 报告名带模式后缀；备注改印 `GET /v1/models…` / `POST /v1/messages` / `:generateContent`（新增 `Row.upstream_paths`）；缺阶段判失败；成功后 `rmtree`（`--keep-data` 可留）；落盘前断言 `DRAFT_SECRET` 不出现 |
+| R-9 | P2 | `settings/agent/page.tsx` + 凭证抽屉 | 新建凭证后只失效 `llm.all`，而设置页凭证下拉的前缀是 `credentials` → 「加完凭证回设置页看不到」 | 抽屉成功后同时失效 `queryKeys.credentials.all` |
+| R-10 | P2 | `settings/agent/page.tsx` | 「值指纹」漏了额外请求头 / 查询参数 / api-version / max_tokens —— 改了这几项，旧的「测试通过」结论不失效（假绿） | 四项进指纹 |
+| R-11 | P2 | `settings/agent/page.tsx` | 凭证下拉不按 `kind` 过滤，图 / 视频 / 语音凭证混进「模型服务」 | 请求改带 `kind=llm` |
+| R-12 | P2 | `settings/agent/page.tsx` + 凭证抽屉 | 「去创建凭证并保存」只带 `protocol`，用户填过的地址丢掉 | 带上 `base_url`，抽屉据此预填 |
+| R-13 | P2 | `services/agent_model.py` | 「`wire` / `paths` 只对 custom 生效」的判断写了两遍；错误文案 `max_cost_per_flow` 与字段名 `max_cost_usd_per_flow` 不一致；函数内 `import re` | 提取 `_protocol_in_effect()`；文案与字段名对齐；`re` 提到模块顶部 |
+| R-14 | P2 | 多个文件 | 换行符与空白：`credentials_verify.py` / `docs/api/openapi.json` / `db/migrations/0001_init.sql` / `tests/conftest.py` / 凭证详情页是 **CRLF**（`.editorconfig` 要求 LF）；`settings.py` 有行尾空格；若干新代码行 >100 列 | 全部归一成 LF / 去行尾空白 / 拆长行（只动本轮新增与改动行，不重排既有文件） |
+| R-15 | P2 | `schemas/llm.py` | 模块 docstring 自称「**不 import 任何 service**」，实际 import 了协议注册表的常量 | 说明改为「只 import 纯数据的注册表常量（`AUTH_STYLES` / `WIRE_KEYS`），不 import 任何有 I/O 的 service」 |
+| R-16 | P2 | `docs/api/examples.md` | `SSRF_BLOCKED` 一行说「命中 `SKILLROUTER_SSRF_DENY`」，与 `netpolicy.validate_admin_target` 的实现和 `troubleshooting.md`（明确说它管抓取侧、不管这里）冲突 | 改为「`netpolicy` 硬编码拒绝云元数据；**不读** `SKILLROUTER_SSRF_DENY`」 |
+| R-17 | P2 | `README.md` | 「本轮实测」表停在上一轮（285 passed / 49 表 56 索引 / `user_version=2` / 合计 386 / `OpenAPI-118 paths`），与 15.2 的实测不一致 | 更新为 372 passed（35 文件）/ 51 表 60 索引 / `user_version=3` / 合计 473 / 123 paths；Playwright 行只认实测口径（11 + 本轮新文件另见 §14.5.5） |
+| R-18 | P2 | `docs/plans/llm-provider-config/spec.md` | §4.4 的「留空即用默认值」、§7.3 的命令 CWD、§5.7 的响应清单三处与实测不符 | 登记为 D-10 / D-11 / D-12（正文同步改成可照做的写法） |
+| R-19 | P2 | `packages/contracts/src/api.d.ts` | 本轮新增 5 条管理端路由后，生成的契约文件没重新生成：`npm run gen:check` 实测「与 OpenAPI 生成结果不一致」，CI 的 `contracts diff` 作业必红 | `cd packages/contracts && npm run gen` 重新生成（`7.13.0` = `package-lock` 锁定版本，与 CI 一致）；`gen:check` 与 `typecheck` 均通过。spec §4.4「明确不改 `packages/**`」指的是不手改，生成物必须跟着 OpenAPI 走（见 D-14） |
+
+### 15.2 重跑证据（本节点，命令即证据）
+
+```text
+$ cd apps/api && python -m pytest tests
+372 passed in 111.55s (0:01:51)
+
+$ python -m ruff check apps/api scripts
+All checks passed!
+
+$ cd apps/api && python -m mypy skillrouter_api
+Success: no issues found in 147 source files
+
+$ cd apps/web && npx tsc --noEmit
+（无输出 = 0 错误）
+
+$ cd apps/web && npx next lint
+✔ No ESLint warnings or errors
+
+$ cd apps/web && npm run build
+✓ Compiled successfully（路由表含 /settings/agent 15.5 kB、/providers/[id] 11.8 kB）
+
+$ python scripts/check_llm_protocols.py
+LLM 协议矩阵：12/12 行通过
+ 证据已写入 M:\takoAI\AragonSkillRouter\var\reports\llm-protocols.md
+
+$ cd packages/contracts && npm run gen:check
+[contracts:gen] 检查通过：packages/contracts/src/api.d.ts 与生成结果一致
+$ cd packages/contracts && npm run typecheck
+（无输出 = 0 错误）
+
+# R-1 的复现（修复前）：空数值变量让进程起不来
+$ set SKILLROUTER_LLM_PROBE_TIMEOUT_S= && cd apps/api && python -c "from skillrouter_api.settings import get_settings; get_settings()"
+ValidationError: 1 validation error for Settings
+llm_probe_timeout_s
+  Input should be a valid number, unable to parse string as a number [input_value='']
+```
+
+12 行矩阵（本轮重跑，备注列已改为**上游真正收到的请求**，因此每行的地址拼接都有证据）：
+
+| 协议 | auth | completion | models |
+|---|---|---|---|
+| `openai` | ✓ `GET /v1/models` | ✓ `POST /v1/chat/completions` | ✓ `source=upstream` |
+| `anthropic` | ✓ `GET /v1/models?limit=1000` + 续页 `after_id` | ✓ `POST /v1/messages` | ✓ 2 次上游（分页） |
+| `google` | ✓ `GET /v1beta/models?pageSize=1000` | ✓ `POST /v1beta/models/{model}:generateContent` | ✓ `source=upstream` |
+| `custom`(wire=openai) | ✓ `GET /openai/models` | ✓ `POST /openai/chat/completions` | ✓ `source=upstream` |
+
+### 15.3 仍未验证（沿用 §14.4 与 spec §10，**不因本轮重跑而升级**）
+
+- 真实第三方上游矩阵（Anthropic `/v1/models` 真实分页、Google `pageSize` 与配额、vLLM / One-API / LiteLLM、`custom + wire=anthropic`）—— 本机无 key；
+- 多副本部署下的探测限流精度 —— 进程内 token bucket；
+- 桌面端 18100 下的全流程 —— 需出包后真机双击；
+- Playwright **自带 chromium** 通路 —— 本机 `cdn.playwright.dev` TLS 被重置，E-05 走系统 Chrome（§14.5.5）。
+
+
+

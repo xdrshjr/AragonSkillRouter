@@ -44,6 +44,11 @@ export interface ListKeyParams extends ListParams {
   page_size?: PageSize;
 }
 
+/** 探测历史 key 的参数：`page_size` 允许 1–100（不限于表格的 20/50/100） */
+export interface ProbeKeyParams extends ListParams {
+  credential_id?: string;
+}
+
 /** key 工厂：所有 list key 都包含查询参数，便于精确失效 */
 export const queryKeys = {
   auth: {
@@ -117,5 +122,13 @@ export const queryKeys = {
   settings: {
     detail: () => ['settings'] as const,
     audit: (params: ListKeyParams) => ['settings', 'audit', params] as const,
+  },
+  /** LLM 协议注册表 / 模型目录 / 探测历史（spec §4.3） */
+  llm: {
+    all: ['llm'] as const,
+    protocols: () => ['llm', 'protocols'] as const,
+    /** `key` 由 `llmTargetKey()` 生成：只含 protocol|wire|base_url|credential_id，绝不含密钥 */
+    models: (key: string) => ['llm', 'models', key] as const,
+    probes: (params?: ProbeKeyParams) => ['llm', 'probes', params ?? {}] as const,
   },
 } as const;

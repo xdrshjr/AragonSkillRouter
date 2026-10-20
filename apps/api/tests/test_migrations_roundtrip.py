@@ -21,8 +21,10 @@ API_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = API_DIR.parents[1]
 ADOPT_SCRIPT = REPO_ROOT / "scripts" / "adopt_alembic.py"
 ALEMBIC_INI = "migrations/alembic.ini"
-HEAD_REVISION = "0003_iteration2"
+HEAD_REVISION = "0004_llm_config"
 ADOPT_REVISION = "0002_engine_upgrade"
+#: 0004 之后的 schema 版本（`PRAGMA user_version`）
+SCHEMA_VERSION = 3
 
 #: 本轮新增的 6 列（§A.6.1）：T-23/T-24/T-42 逐列断言「各在」
 NEW_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -36,6 +38,9 @@ NEW_COLUMNS: tuple[tuple[str, str], ...] = (
 
 #: 不是业务表（Alembic 自己的版本表 / SQLite 内部表）
 NON_BUSINESS = frozenset({"alembic_version"})
+
+#: 0004_llm_config 新增的两张表（spec §6.1 / §6.2 / T-29）
+NEW_TABLES: tuple[str, ...] = ("llm_model_catalog", "llm_connection_probes")
 
 
 # ── 子进程跑 alembic / adopt 脚本 ─────────────────────────────
@@ -182,6 +187,18 @@ def assert_new_columns_present(db: Path) -> None:
         assert column in db_columns(db, table), f"{table}.{column} 缺失"
 
 
+def assert_llm_tables_present(db: Path) -> None:
+    """T-29：0004 的两张新表必须真的被建出来（不是只有版本号前进）。"""
+    tables = db_tables(db)
+    for table in NEW_TABLES:
+        assert table in tables, f"{table} 缺失（0004_llm_config 未生效）"
+    # 关键索引也在（清单命中与探测历史查询都依赖它们）
+    columns = db_columns(db, "llm_model_catalog")
+    assert {"dedupe_key", "protocol", "wire", "base_url", "models", "expires_at"} <= columns
+    probe_columns = db_columns(db, "llm_connection_probes")
+    assert {"protocol", "mode", "ok", "stages", "at"} <= probe_columns
+
+
 # ── T-23 ─────────────────────────────────────────────────────
 def test_upgrade_downgrade_upgrade(tmp_path: Path) -> None:
     """空库 → head（6 列各在）→ base（表清空）→ head 再成功。"""
@@ -191,9 +208,10 @@ def test_upgrade_downgrade_upgrade(tmp_path: Path) -> None:
     up = run_alembic(tmp_path, "upgrade", "head")
     assert up.returncode == 0, _output(up)
     assert db_revision(db) == HEAD_REVISION
-    assert db_user_version(db) == 2
+    assert db_user_version(db) == SCHEMA_VERSION
     assert len(db_tables(db)) > 40, f"表数异常：{len(db_tables(db))}"
     assert_new_columns_present(db)
+    assert_llm_tables_present(db)
 
     down = run_alembic(tmp_path, "downgrade", "base")
     assert down.returncode == 0, _output(down)
@@ -204,8 +222,9 @@ def test_upgrade_downgrade_upgrade(tmp_path: Path) -> None:
     again = run_alembic(tmp_path, "upgrade", "head")
     assert again.returncode == 0, _output(again)
     assert db_revision(db) == HEAD_REVISION
-    assert db_user_version(db) == 2
+    assert db_user_version(db) == SCHEMA_VERSION
     assert_new_columns_present(db)
+    assert_llm_tables_present(db)
 
 
 # ── T-24 ─────────────────────────────────────────────────────
@@ -250,8 +269,9 @@ def test_adopt_alembic_requires_fingerprint_match(tmp_path: Path) -> None:
     up = run_alembic(tmp_path, "upgrade", "head")
     assert up.returncode == 0, _output(up)
     assert db_revision(db) == HEAD_REVISION
-    assert db_user_version(db) == 2
-    assert_new_columns_present(db)  # 由幂等的 0003 补齐
+    assert db_user_version(db) == SCHEMA_VERSION
+    assert_new_columns_present(db)
+    assert_llm_tables_present(db)  # 由幂等的 0003 补齐
 
 
 # ── T-42 ─────────────────────────────────────────────────────
@@ -275,8 +295,9 @@ def test_upgrade_is_idempotent(tmp_path: Path) -> None:
     assert result.returncode == 0, _output(result)
     assert "duplicate column name" not in _output(result).lower()
     assert db_revision(db) == HEAD_REVISION
-    assert db_user_version(db) == 2
+    assert db_user_version(db) == SCHEMA_VERSION
     assert_new_columns_present(db)
+    assert_llm_tables_present(db)
 
 
 # ── assert_migrated（§A.3.8-4：必须真的被调用，且不得静默 return） ──
