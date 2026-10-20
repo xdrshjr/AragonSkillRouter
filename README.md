@@ -182,6 +182,29 @@ Ctrl+C 停全部；`-Action status | stop | restart | logs | check` 管生命周
 </details>
 
 <details>
+<summary><b>桌面端（Electron，免 Python / 免 Node）</b></summary>
+
+不想装 Python 与 Node，就装桌面版：一个安装包内含 Python 边车、Next standalone 控制台与 Node 网关，
+双击「Skill Router」即用（控制台里点的每一次都打到本机真实的 `127.0.0.1:18100`）：
+
+```bat
+cd apps\desktop
+npm install --include=dev
+npm run dist:win          # → apps\desktop\release\SkillRouter-Setup-0.1.0-win-x64.exe
+npm run verify            # 产物/端口契约/哈希清单
+npm run smoke             # 净化 PATH 下的端到端冒烟（含孤儿进程检查）
+```
+
+- 构建与出包：[`apps/desktop/README.md`](apps/desktop/README.md)
+- 数据目录 / 备份 / 错误码处置：[`docs/runbook/desktop-app.md`](docs/runbook/desktop-app.md)
+- 设计契约：[`docs/plans/desktop-electron/spec.md`](docs/plans/desktop-electron/spec.md)
+
+桌面端用 181xx 端口段与 `%APPDATA%\SkillRouter\data`，与上面开发模式的 8000/3000/8500 + `var\`
+**刻意隔离**，两套可同时运行。桌面端**不声称**生产可用（生产请用 `deploy/docker-compose.yml`）。
+
+</details>
+
+<details>
 <summary><b>四个终端手动起（跨平台）</b></summary>
 
 ```bash

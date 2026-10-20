@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Skill Router</title>
+    <!-- splash 没有任何外部资源（内联样式 + 内联脚本 + 纯 CSS 图形）。
+         `default-src 'none'` 同时是 script-src 的兜底，漏写 `script-src 'unsafe-inline'`
+         时下面的进度脚本会被 CSP 整体拦住 —— 表现是 splash 永远停在「正在准备…」、
+         首次登录提示也不出现（spec §2.11 第 4 条）。 -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0b1020;
+        color: #e6e9f2;
+        font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+        user-select: none;
+      }
+      .wrap {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 18px;
+        padding: 28px 30px;
+        background: radial-gradient(120% 120% at 0% 0%, #16203c 0%, #0b1020 60%);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .logo {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        background: linear-gradient(135deg, #4f8cff, #7d5cff);
+        box-shadow: 0 6px 18px rgba(79, 140, 255, 0.35);
+      }
+      h1 {
+        font-size: 17px;
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: 0.2px;
+      }
+      .stage {
+        font-size: 13px;
+        color: #9aa6c4;
+        min-height: 18px;
+      }
+      .bar {
+        position: relative;
+        height: 4px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+      }
+      .bar > i {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 40%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #4f8cff, #7d5cff);
+        animation: slide 1.15s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% {
+          left: -40%;
+        }
+        100% {
+          left: 100%;
+        }
+      }
+      ol {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 12px;
+        color: #7180a3;
+      }
+      ol li[data-done='1'] {
+        color: #6ee7a8;
+      }
+      ol li[data-current='1'] {
+        color: #cbd5f5;
+      }
+      ol li::before {
+        content: '○ ';
+      }
+      ol li[data-done='1']::before {
+        content: '● ';
+      }
+      ol li[data-current='1']::before {
+        content: '◐ ';
+      }
+      .hint {
+        font-size: 11.5px;
+        color: #8b97b8;
+        line-height: 1.5;
+        border-top: 1px solid rgba(255, 255, 255, 0.07);
+        padding-top: 12px;
+      }
+      .hint code {
+        color: #d6dcf0;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 4px;
+        padding: 1px 4px;
+        font-family: Consolas, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="brand">
+        <div class="logo"></div>
+        <h1>Skill Router</h1>
+      </div>
+      <div class="stage" id="stage">正在准备…</div>
+      <div class="bar"><i></i></div>
+      <ol id="steps">
+        <li data-step="preparing">准备数据目录与配置</li>
+        <li data-step="porting">分配本地端口</li>
+        <li data-step="bootstrapping">初始化数据库</li>
+        <li data-step="starting_api">启动接口服务 / 控制台 / 网关</li>
+        <li data-step="ready">完成</li>
+      </ol>
+      <div class="hint" id="hint">
+        首次启动需要初始化数据库，请稍候（冷启最长约 120 秒）。<br />
+        首发账号 <code>admin</code> / 初始密码 <code>adminjr</code>，登录后必须改密。
+      </div>
+    </div>
+    <script>
+      // 主进程通过 loadFile 的 query 注入当前阶段，避免在 splash 里开 IPC 通道。
+      const params = new URLSearchParams(location.search);
+      const state = params.get('state') || 'preparing';
+      const adminInitialized = params.get('adminInitialized');
+      const order = ['preparing', 'porting', 'bootstrapping', 'starting_api', 'ready'];
+      const alias = {
+        idle: 'preparing',
+        starting_worker: 'starting_api',
+        starting_gateway: 'starting_api',
+        starting_web: 'starting_api',
+      };
+      const current = alias[state] || state;
+      const idx = Math.max(0, order.indexOf(current));
+      document.querySelectorAll('#steps li').forEach((li) => {
+        const i = order.indexOf(li.dataset.step);
+        if (i < idx) li.dataset.done = '1';
+        if (i === idx) li.dataset.current = '1';
+      });
+      const labels = {
+        preparing: '正在准备数据目录与配置…',
+        porting: '正在分配本地端口…',
+        bootstrapping: '正在初始化数据库（首次启动较慢）…',
+        starting_api: '正在启动服务…',
+        starting_worker: '正在启动服务…',
+        starting_gateway: '正在启动内置 Agent 网关…',
+        starting_web: '正在启动控制台…',
+        ready: '即将打开控制台…',
+        failed: '启动失败',
+      };
+      const stage = document.getElementById('stage');
+      stage.textContent = labels[state] || labels.preparing;
+      if (adminInitialized === '0') {
+        document.getElementById('hint').innerHTML =
+          '首次初始化完成。初始账号 <code>admin</code> / 初始密码 <code>adminjr</code>，登录后必须改密。';
+      }
+    </script>
+  </body>
+</html>

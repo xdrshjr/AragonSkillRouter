@@ -661,3 +661,254 @@ https://github.com/xdrshjr/AragonSkillRouter/actions/runs/39190593842
 
 真实第三方凭证、真实模型推理、真实外部 Agent / MCP 客户端、`docker compose up`、
 目标硬件性能基线、真实候选版本升级 —— 与 §10.4 相同，本轮没有新增证据。
+
+---
+
+## 12. 桌面端（Electron）实测
+
+> 机器：Windows 10.0.26200（`process.platform==='win32'`）· Node 22.18.0 · npm 10.9.3 ·
+> 构建解释器：uv 管理的 standalone **CPython 3.11.16**（非 conda）·
+> Electron 33.4.11 · electron-builder 26.15.3 · PyInstaller 6.12.0 · Next 15.5.7。
+> 口径不变：**没有命令与输出就不算验证**。本节每条都带可复现命令与真实输出。
+
+### 12.1 单测（`apps/desktop`）
+
+```bat
+cd apps\desktop
+npx vitest run
+npx tsc --noEmit
+```
+
+```text
+ ✓ tests/env.test.ts      (13 tests)
+ ✓ tests/startup.test.ts  (11 tests)
+ ✓ tests/config.test.ts    (5 tests)
+ ✓ tests/ports.test.ts    (13 tests)
+ Test Files  4 passed (4)
+      Tests  42 passed (42)
+```
+
+`npx tsc --noEmit` → 退出码 0（0 错误）。
+
+覆盖的关键断言：`SKILLROUTER_INTERNAL_URL` 在 **api 与 gateway 两份 env** 中都存在且都指向 18100（P0-1）；
+`SKILLROUTER_MASTER_KEY` 不存在；继承的 `SKILLROUTER_*`/`AGENT_*`/`ENGINE_*`/`PYTHON*` 被剔除（P1-12）；
+`SKILLROUTER_ENGINE_TOOLCHAIN==='gateway'`；`E-D01` 与 `W-D06` 的分支；`checkPortContract()` 的
+`none` / `repair` / `E-D07` 三种结果；`routes-manifest.json` 的**数组与 Next 15 对象两种形态**（I-4 回归守卫）；
+状态机九条转移 + `E-D03/E-D04/E-D05` + 退避 1/3/9 s。
+
+### 12.2 出包（`npm run dist:win`）
+
+```bat
+cd apps\desktop
+npm run dist:win
+```
+
+```text
+[build:all] ▶ gateway
+[build:all] ✔ gateway（39.6 s）
+[build:all] ✔ web（55.6 s）
+[build:gateway] 组装完成：...\build\gateway
+[build:web] 端口契约断言通过：/api/:path* → http://127.0.0.1:18100/api/:path*
+[build:sidecar] OK  --version → skillrouter-server 0.1.0 (skillrouter_api 0.1.0, py3.11)
+[build:sidecar] OK  bootstrap 自检通过（migration=empty_db_upgrade, admin.created=true）
+[build:sidecar] OK  api 自检通过（/healthz ok=true initialized=true schema=2）
+[build:all] ✔ sidecar（63.9 s）
+[build:all] ✔ main（0.2 s）
+[build:all] 资源汇总完成
+• building        target=nsis file=release\SkillRouter-Setup-0.1.0-win-x64.exe
+```
+
+产物：
+
+| 产物 | 大小 |
+|---|---|
+| `apps\desktop\release\SkillRouter-Setup-0.1.0-win-x64.exe` | **122.8 MB** |
+| `apps\desktop\release\win-unpacked\SkillRouter.exe` | 180.0 MB |
+| `apps\desktop\release\win-unpacked\resources\{python,web,gateway}` | 176 / 2096 / 2427 files |
+
+### 12.3 `npm run verify`
+
+```text
+1) 产物与资源完整性
+  ok   NSIS 安装器存在 — 122.8 MB
+  ok   win-unpacked/SkillRouter.exe 存在 — 180.0 MB
+  ok   resources/python 存在 — 176 files
+  ok   resources/web 存在 — 2096 files
+  ok   resources/gateway 存在 — 2427 files
+  ok   resources/app.asar 存在 — 0.1 MB
+  ok   resources/web/server.js 存在 — 7 KB
+  ok   PyInstaller 双布局迁移目录存在 — 2 布局
+
+2) 两个 exe 的 --version（P1-5）
+  ok   skillrouter-server.exe --version — skillrouter-server 0.1.0 (skillrouter_api 0.1.0, py3.11)
+  ok   SkillRouter.exe --version — Skill Router 0.1.0 (electron 33.4.11)
+
+3) 端口契约（构建期烧死的 /api 目标）
+  ok   routes-manifest.json /api/:path* → 127.0.0.1:18100 — http://127.0.0.1:18100/api/:path*
+
+4) 哈希清单
+  ok   写出 SKILLROUTER-SHA256SUMS.txt
+[verify] 全部通过
+```
+
+`apps/desktop/release/SKILLROUTER-SHA256SUMS.txt`（**最后一轮出包之后**的值；本轮链是
+`npm run dist:win` → 修完审阅问题 → `npm run build:main` + `electron-builder` 重新打包，
+下面这组哈希对应「本次冒烟/交互实测所用的那份产物」）：
+
+```text
+f324d78d55e81329d05b494edf95336807f84ada363b3e7cb27fe56be738d9df  SkillRouter-Setup-0.1.0-win-x64.exe
+bb2a5f435e0a7f2c6f32df88571d1ee2313dc51ef07c85843c0fb32935285a28  win-unpacked/SkillRouter.exe
+51a9ee61dcfea0be4b68f0d3dd63c7d38f94c2fc7a512b88db671c2e063e2991  resources/python/ (176 files)
+418a6555c68c533f8e0bb51125ef7e6364333a26bfb76c1fffdbb90ba01f2633  resources/web/ (2096 files)
+69d9127ca88247d585c7c966d9cce596e057bd6573269adfc52337923c474526  resources/gateway/ (2427 files)
+a68cc52d279478113aeca58ebe87881cbf32d6945242a36e24e41f23a7991aaf  resources/python/skillrouter-server.exe
+```
+
+> 安装器哈希在两次出包之间会变（NSIS 自身的时间戳/压缩非确定性），`SkillRouter.exe` 与
+> `resources/gateway/` 稳定；`resources/{python,web}` 的目录哈希会随 PyInstaller / Next 产物微调而变。
+> 清单的用途是「这个安装包和这次冒烟是同一份」，不是跨次复现的固定值。
+
+### 12.4 `npm run smoke`（净化 PATH）
+
+```bat
+cd apps\desktop
+npm run smoke
+```
+
+```text
+[smoke] 纯净前探测：pythonOnPath=true nodeOnPath=true
+[smoke] 被测进程 PATH=C:\Windows\system32;C:\Windows
+[smoke] 启动 ...\release\win-unpacked\SkillRouter.exe --smoke-test --data-dir "C:\...\Temp\Skill Router Data 1792472395824"
+[smoke] 被测进程退出码 0（7.3 s）
+[smoke] checks：resources_present=ok port_contract=ok sidecar_bootstrap=ok api_healthz=ok
+        gateway_healthz=ok gateway_platform_reach=ok web_login_page=ok web_api_proxy=ok login=ok single_instance=ok
+[smoke] shellChecks：clean_shutdown=ok
+[smoke] 冒烟通过
+```
+
+报告要点（`apps/desktop/release/smoke-report.json`，`ok: true`，`durationMs: 6969`——**从进程启动算到报告落盘**，
+含自举与四次 spawn，不再是「只统计检查耗时」）：
+
+- `externalRuntime.pathUsed = "C:\Windows\system32;C:\Windows"` —— **目标机不需要 Python / Node**；
+- `port_contract = { ok: true, apiPort: 18100, manifestPort: 18100 }` —— 三方比对里可判定的两方真实相等
+  （第三方式 `--port` 由状态机在同一值上注入，见 `main.ts` 的 `enforcePortContract()`）；
+- `sidecar_bootstrap = { ok: true, code: 0, migrationMode: "empty_db_upgrade", adminCreated: true }`
+  —— 退出码来自本次 bootstrap 的真实退出码，不是「字符串长度 > 0」；
+- `api_healthz.schemaVersion = 2`、`initialized = true`；
+- `gateway_platform_reach.internalUrl = "http://127.0.0.1:18100"`（P0-1 静态项必判；`dynamic: "skipped"`，
+  理由 `engine_not_configured`，**不冒充已验证**）；
+- `login.mustChangePassword = true`（经 Next 反代 → api，`sr_session` + `sr_csrf` 双 Cookie）；
+- `single_instance.detail = "second launch exited with code 0 and spawned 0 services"`；
+- `shellChecks.clean_shutdown = { ok: true, detail: "tasklist: skillrouter-server.exe=0 SkillRouter.exe=0" }`，
+  `artifact_hash.exe = bb2a5f43…`（与 `SKILLROUTER-SHA256SUMS.txt` 中 `win-unpacked/SkillRouter.exe` 一致）。
+
+> 反面证据（保留）：I-5 修复**之前**同一套冒烟的输出是
+> `gateway_healthz=FAIL / web_login_page=FAIL / web_api_proxy=FAIL / login=FAIL`，而
+> `sidecar_bootstrap`、`api_healthz`、`port_contract`、`clean_shutdown` 全绿。
+> 这正是 §4.3 警告的「绿灯但完全不可用」——只探 `/healthz` 抓不到，反代 + 登录闭环抓得到。
+
+### 12.5 交互式启动（等价「双击」，非 `--smoke-test`）
+
+用干净环境启动 `win-unpacked\SkillRouter.exe`（本机 shell 带 `ELECTRON_RUN_AS_NODE=1`，必须剔除——
+见 spec「实施过程发现的方案缺陷」I-8），随后从外部探测：
+
+```text
+GET  http://127.0.0.1:18101/login          → 200，10746 字节，含登录表单
+GET  http://127.0.0.1:18101/api/health     → 200 {"status":"ok"}      ← Next rewrite → api，反代链路通
+POST http://127.0.0.1:18101/api/admin/auth/login {"username":"admin","password":"adminjr"}
+                                           → 200 {"admin":{...,"must_change_password":true},"csrf_token":"..."}
+                                             Set-Cookie: sr_session=…; sr_csrf=…
+```
+
+`main.log` 的启动时间线（**冷启**：全新数据目录，要跑迁移 + 建管理员 + 首次加载运行时）：
+
+```text
+[05:00:34.961Z] [main] state=idle
+[05:00:34.989Z] [main] state=bootstrapping
+[05:00:37.098Z] [main] event=first_run admin_created=true
+[05:00:37.100Z] [main] state=starting_api
+[05:00:40.926Z] [main] state=ready ports={"api":18100,"gateway":18102,"web":18101}
+[05:00:41.163Z] [main] event=api_healthz service=skillrouter-api matches=true
+```
+
+**`state=idle` → `state=ready` = 5.965 s**（INV-3 冷启上限 120 s / 热启上限 45 s，均满足；
+口径与测量点按 spec §0 的 `main.log` 两行时间差）。
+`state=ready` 现在**只出现一行**（同时带 ports）——审阅轮发现它此前被 `move('ready')` 与
+`hooks.log(...)` 各写一遍，grep 计数会翻倍。
+
+关停（`taskkill /PID <主进程>` 不带 `/F`，等价「点关闭窗口」：WM_CLOSE → `window-all-closed` → `before-quit`）：
+
+```text
+[05:00:41.752Z] event=shutdown_begin
+[05:00:41.810Z] event=stopped name=web     pid=12944 graceful=true
+[05:00:41.859Z] event=stopped name=gateway pid=19116 graceful=true
+[05:00:41.914Z] event=stopped name=worker  pid=37196 graceful=true
+[05:00:41.958Z] event=stopped name=api     pid=520   graceful=true
+[05:00:41.959Z] event=shutdown_done
+```
+
+关停后 `tasklist /FI "IMAGENAME eq skillrouter-server.exe"` 与 `…eq SkillRouter.exe` 均返回
+「没有运行的任务匹配指定标准」——**零孤儿进程**（逆序 web → gateway → worker → api，全部 graceful，
+没有退化到 `taskkill /T /F`）；主进程退出码 0。
+
+### 12.6 手工「双击可用」清单（§6.3）的登记状态
+
+| # | 项 | 状态 | 证据 / 说明 |
+|---|---|---|---|
+| M1 | 无 Python / 无 Node 的干净机 | **部分** | 本次在同一台机器上用**净化 PATH**（`C:\Windows\system32;C:\Windows`）证明三个运行时都来自安装包；**没有**在真正没装过 Python/Node 的虚拟机里跑过 → 该项保持**待验证** |
+| M2 | 双击安装器 → 安装 → 桌面快捷方式 | **待验证** | 安装器已产出（122.8 MB，NSIS，`oneClick: false`、`perMachine: false`、创建桌面/开始菜单快捷方式）；无人值守环境下不执行交互式安装（会弹 UAC/向导） |
+| M3 | 双击启动 → 登录页，冷启 ≤120 s / 热启 ≤45 s | **已实现 + 本次实测** | 见 §12.5：冷启 **5.965 s**；`/login` 200 且有登录表单 |
+| M4 | `admin`/`adminjr` 登录 → 强制改密 | **部分** | 登录 API 已实测 `must_change_password: true`（后端既有流程）；改密后的 UI 跳转未在真机上点过 |
+| M5 | 控制台四态徽标 / `/providers` 新建 | **待验证** | 需要人点；后端与页面在既有 e2e（9 项）里覆盖 |
+| M6 | 关窗口 → 任务管理器无残留 | **已实现 + 本次实测** | 见 §12.5 关停日志 + tasklist 空结果 |
+| M7 | 再次双击 → 直接进登录页（不重新初始化） | **部分** | 第二实例已被证明「以 0 退出、0 spawn」（`single_instance`）；「数据仍在」由数据目录持久化保证，未人工点 |
+| M8 | 运行中再次双击 → 聚焦已有窗口 | **已实现** | `app.requestSingleInstanceLock()` + `second-instance` 聚焦；冒烟里以退出码 0 证明锁生效（聚焦动作本身要人看） |
+| M9 | 卸载保留应用数据 | **已实现** | `nsis.deleteAppDataOnUninstall: false`；未执行卸载 |
+| M10 | 未签名 → SmartScreen 提示 | **已知差距** | 未做代码签名（R1）；安装器未签名，`signtool` 那几行是 electron-builder 的默认占位动作，**不代表已签名** |
+
+> 因此本轮的诚实结论：**打包成功、双击可用性在「程序行为」层面已实测（启动/登录/反代/关停/单实例）**；
+> 「在真正没装 Python/Node 的干净机上人工双击安装」这几条按仓库口径继续标**待验证**，不写成已验证。
+
+### 12.7 回归（现有证据未退化）
+
+```bat
+cd apps\api && python -m pytest tests -q
+cd agents\aragon-gateway && npx vitest run
+cd packages\skillrouter-cli && npx vitest run
+cd apps\web && npx tsc --noEmit
+```
+
+桌面端是纯增量（INV-1）：**只新增 `apps/desktop/**` 与三份文档**，对既有源码零修改，
+因此上面四套不需要重跑即可判定不受影响；`.gitignore` / `README.md` / `docs/README.md` 仅追加。
+本轮实际重跑的是桌面端自身的 42 项单测 + `tsc --noEmit` + `dist:win`（含审阅修复后重新 `electron-builder` 打包）
++ `verify` + `smoke` + 交互式启动/关停实测。
+
+### 12.8 复审轮（code review）发现并已修复的问题
+
+> 口径：下面是**复审节点逐文件对照 spec 后发现的问题**，全部已在源码里改掉（没有留 TODO），
+> 改完重跑了 §12.1 / §12.3 / §12.4 / §12.5 的四套命令，上面贴的就是**修复后**的输出。
+> 判定依据：`splash.html` 的 CSP 与脚本、`main.ts` 的关注点、`supervisor.ts` 的事件处理、
+> `smoke.ts` 的报告字段、`verify-artifact.mjs` 的路径来源。
+
+| # | 位置 | 问题（为什么算缺陷） | 修复 |
+|---|---|---|---|
+| R-1 | `splash.html` | CSP 是 `default-src 'none'; style-src 'unsafe-inline'`，**没有 `script-src`** → 进度/提示脚本被整体拦截：splash 永远停在「正在准备…」，`adminInitialized === false` 时的「首次登录 admin / adminjr」提示（spec §2.11 第 4 条的唯一落点）**永不出现** | 显式加 `script-src 'unsafe-inline'`，其余指令不动（splash 无外部资源） |
+| R-2 | `main.ts` 错误窗口回调 | 「打开日志」执行的是 `void app.whenReady()`（一个已 resolve 的 Promise，什么也不做）——按钮点了没反应 | 抽出 `windows.ts: openLogsDir()`，错误窗口 / `W-D06` 对话框共用 |
+| R-3 | `main.ts` 两处「重启服务」 | ① 两处重复实现（IPC 与菜单）行为不一致（菜单那处还不重置状态）；② 二者都只复位本模块的 `shuttingDown`，**没有复位 supervisor 的关停标志** → 重启后子进程退出回调被永久拦掉，崩溃监控静默失效 | 合并为唯一的 `restartServices()`（带重入保护），并新增 `Supervisor.resetShuttingDown()` |
+| R-4 | `supervisor.ts` | `spawn()` 没有接 `error` 事件：exe 被杀软删掉/路径错时，Electron 会抛未捕获异常（**主进程直接闪退**），且 `exited` 永不 resolve → 关停白等 8 s | 在 `exited` 的同一 Promise 里接 `error`：记 `error=spawn_failed`、摘掉 handle、resolve 收尾 |
+| R-5 | `main.ts` `runBootstrap()` | bootstrap 子进程不在 supervisor 管里，也没有引用 → 用户在「初始化数据库」那 120 s 内关窗口时它会变成孤儿继续写库（下次启动 `DB_BUSY`，R9） | 模块级 `bootstrapChild` 引用，`shutdown()` 里一并收尾 |
+| R-6 | `services.ts` / `paths.ts` | web 的 `cwd` 用的是 `resources` 根（spec §2.8 明确 `cwd: resourcesWeb`），与「Next standalone 以自身目录为基准」不一致 | `DesktopPaths` 增加 `webRoot` / `gatewayRoot`，web 与网关的 `cwd` 钉到各自根；读 manifest 也统一走 `paths.webRoot` |
+| R-7 | `smoke.ts` | 两项检查是**假检查**：`port_contract` 只判 `apiPort !== null`（恒真），`sidecar_bootstrap` 只判字符串长度>0（恒真）；`startedAt`/`durationMs` 从「检查开始」计时，与 spec §4.4 的语义（本次运行）不符；`bootstrapSummary` 字段传的是状态机的 `detail` 且从未被使用 | 传入 manifest 端口与 bootstrap 真实退出码，改为真实比对（`manifestPort === apiPort`、`code === 0 && mode !== 'unknown'`）；`startedAt` 取进程启动时刻；删掉死字段 |
+| R-8 | `ipc.ts` / `preload.ts` | 通道名在两侧各写一份字面量（改一处忘另一处 → invoke 永远 pending）；且 `ipcMain.handle` 对同一通道重复注册会抛错（`activate` 重建窗口时可能踩到） | 通道名收敛到 `shared/constants.ts: IPC_CHANNELS`；`registerIpc()` 先 `unregisterIpc()` 保证幂等 |
+| R-9 | `verify-artifact.mjs` | 安装器文件名把版本硬编码成 `0.1.0`，升版后「产物明明在，verify 说缺」 | 从 `package.json` 读 `version` |
+| R-10 | `startup.ts` | `state=ready` 被写两遍（`move()` 一次 + 额外 `hooks.log()` 一次），grep 计数翻倍；另有 `assertNever` + `void assertNever`、`main.ts` 的 `void unregisterIpc` / `void bootstrapOutput` / 死函数 `announceState` / `smoke.ts` 的 `export { API_SERVICE_TAG }` 等死代码 | `move('ready', ' ports=…')` 写一行；死代码全部删除（无「留着的 TODO」） |
+| R-11 | `main.ts` | `ServiceStatus` 在 `failed` 状态下把四个服务都报成 `starting`（与实际相反）；`import … from './../shared/constants'` 与仓库其余文件的 `'../shared/constants'` 风格不一致 | 失败态映射为 `down`；import 路径统一为 `'../shared/…'` |
+| R-12 | `ports.test.ts` | `readManifestApiPort()` 只测了数组形态；I-4 记录的「Next 15 对象形态」没有回归守卫 | 新增 1 例对象形态用例（总数 41 → **42**） |
+| R-13 | `package.json` | `scripts/make-icon.mjs`（spec §3#33）没有任何入口，等于存在但不可达 | 增加 `make:icon` 脚本 |
+| R-14 | `python/requirements-build.txt` | 注释引用的实施记录编号写错（I-2 → 实际是 I-1） | 更正为 I-1 |
+
+**按 spec 保留、故意不改的两项**（写在这里以免下一轮当成漏修）：
+
+1. `taskkill /T /F` 只在「优雅 exit 超时」后触发 —— spec §2.10 的原文顺序就是如此；
+   `clean_shutdown`（§12.4）在真实关停下为绿，本轮不擅自改变关停语义。
+2. `E-D06` 仍不作为错误码存在（spec §2.3.2 已改为 `W-D06` 警告级），runbook 里那行是「它不是错误码」的说明。

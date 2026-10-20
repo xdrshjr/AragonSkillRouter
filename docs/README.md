@@ -17,6 +17,7 @@
 | 排查报错 | [runbook/troubleshooting.md](runbook/troubleshooting.md) | 附录 A 每个错误码 → 原因 / 处置 / 定位命令 |
 | 核对验收 | [runbook/verification-checklist.md](runbook/verification-checklist.md) | §15.2/§15.3/§15.4/§15.5 的复现步骤、最小凭证、待验证登记 |
 | 了解实现与 spec 的差异 | [plans/skill-router/implementation-notes.md](plans/skill-router/implementation-notes.md) | 逐节映射 + 已实现/部分/未实现/待验证 + 偏差解释 |
+| 装桌面端（Electron，免 Python / 免 Node） | [../apps/desktop/README.md](../apps/desktop/README.md) · [plans/desktop-electron/spec.md](plans/desktop-electron/spec.md) · [runbook/desktop-app.md](runbook/desktop-app.md) | 出包（`npm run dist:win`）、产物路径、双击验收、数据目录与备份、桌面端错误码（`E-D01`~`E-D07` / `W-D01` / `W-D06`） |
 | 读设计契约 | [plans/skill-router/spec.md](plans/skill-router/spec.md) | v2.0，3300+ 行，实现以它为准 |
 | 查上游 AragonAgent 事实 | [plans/skill-router/aragonagent-upstream.md](plans/skill-router/aragonagent-upstream.md) | 实测记录与能力边界 |
 
@@ -66,6 +67,14 @@
 | [`spec.md`](plans/skill-router/spec.md) | v2.0 实现契约（表名、字段、路由、事件名、环境变量以它为准） |
 | [`aragonagent-upstream.md`](plans/skill-router/aragonagent-upstream.md) | 上游实测事实与能力边界 |
 | [`implementation-notes.md`](plans/skill-router/implementation-notes.md) | 实现映射、偏差解释、已实现/部分/未实现/待验证清单 |
+
+### 桌面端（`docs/plans/desktop-electron/`）
+
+| 文件 | 说明 |
+|---|---|
+| [`spec.md`](plans/desktop-electron/spec.md) | v2.0 桌面端（Electron）实现契约：端口契约、sidecar 双检、状态机、错误码、验收清单 |
+| [`../apps/desktop/README.md`](../apps/desktop/README.md) | 构建 / 出包 / 双击验收 / 排错的唯一入口（命令 + 期望输出） |
+| [`runbook/desktop-app.md`](runbook/desktop-app.md) | 数据目录、备份恢复、端口冲突、日志、升级卸载、错误码处置表 |
 
 ## 阅读约定
 

@@ -1,0 +1,32 @@
+{
+  "name": "@skillrouter/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Skill Router desktop distribution (Electron shell hosting the real FastAPI + worker + Node gateway + Next.js console).",
+  "license": "SEE LICENSE IN ../../packages/skillrouter-cli/package.json",
+  "main": "dist/main.js",
+  "author": "Skill Router",
+  "scripts": {
+    "build": "node scripts/build-all.mjs",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "build:web": "node scripts/build-web.mjs",
+    "build:gateway": "node scripts/build-gateway.mjs",
+    "build:main": "node esbuild.config.mjs",
+    "make:icon": "node scripts/make-icon.mjs",
+    "dist": "npm run build",
+    "dist:win": "npm run build && electron-builder --win nsis dir --x64 --publish never",
+    "verify": "node scripts/verify-artifact.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev": "node esbuild.config.mjs --watch"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "electron": "33.4.11",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.24.2",
+    "typescript": "5.7.2",
+    "vitest": "2.1.8"
+  }
+}

@@ -1,0 +1,8 @@
+# 桌面端 sidecar 的构建依赖（spec §2.7）。
+#
+# 重要（实施期修正，见 spec.md「## 实施过程发现的方案缺陷」I-1）：
+# pip 会相对**本文件所在目录**（apps/desktop/python/）解析嵌套的 `-r`，
+# 不是相对 cwd。因此这里必须写 `../../../apps/api/requirements.txt`
+# （python → desktop → apps → 仓库根 → apps/api），写 `../../apps/api/...` 会指向 apps/apps/api。
+-r ../../../apps/api/requirements.txt
+pyinstaller==6.12.0

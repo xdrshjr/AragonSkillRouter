@@ -40,6 +40,18 @@ deploy/certs/
 # agent orchestration harness（任务提示/报告/黑板属于运行时数据，不进仓库）
 .agentmesh/
 
+# desktop（Electron）构建产物与依赖：electron 一套 ≥300 MB，漏掉 node_modules 会让
+# `git status` 瞬间出现上万文件（spec P1-14）
+apps/desktop/node_modules/
+apps/desktop/release/
+apps/desktop/build/
+apps/desktop/dist/
+apps/desktop/resources/
+# …但应用图标要进仓库（spec §3#23：build/icon.png 是提交物，其余 build/ 是产物）
+!apps/desktop/build/
+apps/desktop/build/*
+!apps/desktop/build/icon.png
+
 # editors / os
 .DS_Store
 Thumbs.db

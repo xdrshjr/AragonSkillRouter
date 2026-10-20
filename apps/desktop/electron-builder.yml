@@ -1,0 +1,69 @@
+# electron-builder 配置（spec §2.13）。
+# 口径：`directories.output: release` **相对 apps/desktop**，因此安装器落在
+# apps/desktop/release/SkillRouter-Setup-0.1.0-win-x64.exe（全文只有这一个口径）。
+appId: com.skillrouter.desktop
+productName: Skill Router
+copyright: Skill Router
+# P1-4 相关：spec §2.4 的产物文件名是 SkillRouter.exe（无空格），
+# 不显式指定的话 electron-builder 会用 productName 生成 "Skill Router.exe"。
+executableName: SkillRouter
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - dist/**/*
+  - splash.html
+  - package.json
+
+asar: true
+
+extraResources:
+  # 注意：这三个目录里都有 node_modules（Next standalone 的 traced 依赖、网关的生产依赖）。
+  # electron-builder 的 extraResources 会跳过 node_modules（实测：安装出来的
+  # resources\{web,gateway}\node_modules 缺失 → 网关 `Cannot find package 'fastify'`、
+  # web `Cannot find module 'next'`）。因此 node_modules **单独**作为一条 FileSet 复制，
+  # 把它变成 from 的根而不是子目录，绕开那条排除规则。
+  - from: resources/python
+    to: python
+  - from: resources/web
+    to: web
+    filter:
+      - '**/*'
+      - '!node_modules/**/*'
+  - from: resources/web/node_modules
+    to: web/node_modules
+  - from: resources/gateway
+    to: gateway
+    filter:
+      - '**/*'
+      - '!node_modules/**/*'
+  - from: resources/gateway/node_modules
+    to: gateway/node_modules
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: dir
+      arch:
+        - x64
+  icon: build/icon.png
+  artifactName: SkillRouter-Setup-${version}-win-x64.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Skill Router
+  deleteAppDataOnUninstall: false
+  runAfterFinish: true
+  # 未做代码签名（R1）：不写证书相关字段，签名是后续独立任务
+  include: ''
+
+# 桌面端没有原生模块，禁用 rebuild 以免拖慢出包并触发无关下载
+npmRebuild: false
+buildDependenciesFromSource: false
