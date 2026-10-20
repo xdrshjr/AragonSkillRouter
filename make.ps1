@@ -67,6 +67,7 @@ Skill Router 任务（.\make.ps1 <task>）：
   lint          ruff + eslint
   typecheck     mypy + tsc --noEmit
   e2e           Playwright（chromium）
+  desktop       桌面端一键出包（apps\desktop → release\SkillRouter-Setup-*.exe）
   up            docker compose up -d
   down          docker compose down（保留数据卷）
   logs          docker compose logs -f api worker gateway
@@ -150,6 +151,11 @@ switch ($Task.ToLower()) {
     'e2e' {
         Write-Step 'playwright test'
         Invoke-Native 'npx' @('playwright', 'test') (Join-Path $Root 'apps/web')
+    }
+
+    'desktop' {
+        Write-Step '桌面端一键出包（build-desktop.ps1：venv → 依赖 → dist:win → verify）'
+        Invoke-Native 'powershell' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $Root 'build-desktop.ps1'))
     }
 
     'up' { Write-Step 'docker compose up -d'; Invoke-Native 'docker' ($COMPOSE + @('up', '-d')) }

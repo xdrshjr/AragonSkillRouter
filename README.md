@@ -197,6 +197,15 @@ npm run verify            # 产物/端口契约/哈希清单
 npm run smoke             # 净化 PATH 下的端到端冒烟（含孤儿进程检查）
 ```
 
+或者**在仓库根用一条命令出包**（体检 → 纯净 CPython 3.11 venv → 依赖 → 出包 → 校验 → 汇总）：
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-desktop.ps1
+```
+
+`-Mode prepare|build|verify|smoke|clean`、`-Clean`、`-Smoke`、`-PythonBin` 见
+`.\build-desktop.ps1 -Mode help`；日志落 `var\logs\desktop\build-<时间戳>.log`。
+
 - 构建与出包：[`apps/desktop/README.md`](apps/desktop/README.md)
 - 数据目录 / 备份 / 错误码处置：[`docs/runbook/desktop-app.md`](docs/runbook/desktop-app.md)
 - 设计契约：[`docs/plans/desktop-electron/spec.md`](docs/plans/desktop-electron/spec.md)

@@ -32,6 +32,12 @@ npm run dist:win
 ```
 
 `dist:win` = `npm run build` + `electron-builder --win nsis dir --x64 --publish never`。
+
+> **仓库根的一条命令版本**：`powershell -NoProfile -ExecutionPolicy Bypass -File .\build-desktop.ps1`
+> 额外包掉三件手工步骤 —— 前置体检（Node ≥ 22 / 磁盘 / 长路径）、用
+> `uv venv --seed --python 3.11 --managed-python` 建**纯净**解释器并设 `PYTHON_BIN`（§2.1）、
+> 以及出包后自动跑 `verify` 并汇总产物 SHA256。`-Mode prepare|build|verify|smoke|clean` 见 `-Mode help`。
+
 `build`（`scripts/build-all.mjs`）的顺序固定，任一步失败即停：
 
 1. `build:gateway` → `build/gateway/`（tsc + 仅生产依赖）
