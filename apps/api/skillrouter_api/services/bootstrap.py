@@ -26,7 +26,10 @@ from ..settings import settings
 
 log = get_logger("skillrouter.run")
 
-SCHEMA_VERSION = 2
+#: `PRAGMA user_version` 的期望值，与迁移链路末端保持一致（0004_llm_config 把 2 抬到 3）。
+#: 桌面端 sidecar 的 launcher 用这个常量做硬校验（apps/desktop/python/launcher.py），
+#: 漏改会让 `npm run dist:win` 在 sidecar 自检处红（E-D03）。
+SCHEMA_VERSION = 3
 
 #: 显式启用 `create_all` 的开关（单测提速；生产绝不设置）
 CREATE_ALL_ENV = "SKILLROUTER_CREATE_ALL"
