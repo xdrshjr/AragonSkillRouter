@@ -40,17 +40,20 @@ test.describe('核心闭环：配置 → 测试 → 发布 → 调用 → 记录
     await page.goto('/capabilities');
     await expect(page.getByRole('table', { name: /能力列表/ })).toBeVisible();
 
-    // 3) 打开第一个能力并确认三个状态徽标独立显示
+    // 3) 打开第一个能力并确认四态徽标独立存在
     const firstCapability = page.getByRole('link', { name: /^[a-z0-9]+\./ }).first();
     if (await firstCapability.count()) {
       await firstCapability.click();
-      await expect(page.getByLabel('能力状态')).toContainText('已保存');
-      await expect(page.getByLabel('能力状态')).toContainText('测试通过');
-      // 未测试时发布按钮必须禁用（不允许伪造成功）
-      const publishButton = page.getByRole('button', { name: '发布', exact: true });
-      const testedBadge = await page.getByLabel('能力状态').innerText();
+      const stateBadge = page.getByLabel('能力状态');
+      await expect(stateBadge).toContainText('已保存');
+      // 「测试通过 / 未测试」是二选一的独立状态，取决于数据，不能硬断言某一个。
+      // （原用例先硬断言「测试通过」，紧接着又假设「未测试时发布按钮禁用」——
+      //   两句自相矛盾，任何未测试的能力都会让它必红，属于用例假设与实现不符。）
+      await expect(stateBadge).toContainText(/测试通过|未测试/);
+      const testedBadge = await stateBadge.innerText();
       if (testedBadge.includes('未测试')) {
-        await expect(publishButton).toBeDisabled();
+        // 不允许伪造成功：没测试证据时发布按钮必须禁用
+        await expect(page.getByRole('button', { name: '发布', exact: true })).toBeDisabled();
       }
     }
 

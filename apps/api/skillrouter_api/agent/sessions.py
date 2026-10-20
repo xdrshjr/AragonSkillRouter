@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from ..db import db_session, db_write, now_iso, uuid_pk
 from ..errors import ApiError, Code
@@ -178,6 +178,56 @@ def queue_turn(
         "status": "queued" if position else "running",
         "queued": position > 0,
     }
+
+
+def dequeue_next(session_id: str) -> dict | None:
+    """把该会话里排在最前面的 `queued` 轮次推进为 `running`，返回它；没有就返回 None。
+
+    **为什么必须有这一步**：`queue_turn()` 在「已有 running/queued 轮次」时会把新轮次
+    记成 `queued`，而控制台的输入框**明确允许**执行中继续发送（`AgentComposer`：
+    「执行中，可继续输入（Enter 发送，会排队）」）。没有这条推进，排队的轮次永远停在
+    `queued`：界面上的「排队中（第 N 条）」永久挂着，谁也跑不了——和「轮次永久 running」
+    是同一类缺陷，只是换了个状态字。
+
+    用 compare-and-set（`WHERE status='queued'`）而不是「先查后写」：两个 worker 同时
+    收尾同一会话时，只有一方能把同一行从 `queued` 改成 `running`，不会双跑。
+    """
+    for _ in range(5):
+        with db_session() as s:
+            busy = s.scalar(
+                select(AgentTurn.id).where(
+                    AgentTurn.session_id == session_id, AgentTurn.status == "running"
+                )
+            )
+            candidate = s.scalar(
+                select(AgentTurn.id)
+                .where(AgentTurn.session_id == session_id, AgentTurn.status == "queued")
+                .order_by(AgentTurn.ordinal)
+            )
+        if busy is not None or candidate is None:
+            return None
+        with db_write() as s:
+            claimed = s.execute(
+                update(AgentTurn)
+                .where(AgentTurn.id == candidate, AgentTurn.status == "queued")
+                .values(status="running", queue_position=None, started_at=now_iso())
+            ).rowcount
+            if not claimed:
+                # 被别人抢先了：重读一次，别把同一轮跑两遍
+                continue
+            # 剩余排队位置重新编号，别让「第 N 条」停在旧数字上
+            still_queued = list(
+                s.scalars(
+                    select(AgentTurn)
+                    .where(AgentTurn.session_id == session_id, AgentTurn.status == "queued")
+                    .order_by(AgentTurn.ordinal)
+                )
+            )
+            for index, row in enumerate(still_queued, start=1):
+                row.queue_position = index
+        log.info("agent_turn_dequeued", extra={"object": candidate})
+        return {"turn_id": candidate, "session_id": session_id}
+    return None
 
 
 def append_user_event(turn_id: str, session_id: str, text: str) -> None:

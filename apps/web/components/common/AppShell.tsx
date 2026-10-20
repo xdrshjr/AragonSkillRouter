@@ -123,6 +123,7 @@ const SEARCH_TARGETS: { href: string; label: string; keywords: string }[] = [
   { href: '/tasks', label: '任务', keywords: 'tasks 异步 队列' },
   { href: '/settings', label: '设置', keywords: 'settings 预算 保留 审计' },
   { href: '/settings/engine', label: '引擎升级', keywords: 'engine 升级 回滚 候选' },
+  { href: '/settings/agent', label: 'Agent 模型', keywords: 'agent model provider credential 模型' },
 ];
 
 const ENGINE_TONE: Record<EngineState, { dot: string; label: string }> = {

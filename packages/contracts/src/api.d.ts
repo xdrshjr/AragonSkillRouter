@@ -1224,7 +1224,14 @@ export type paths = {
             path?: never;
             cookie?: never;
         };
-        /** Stream */
+        /**
+         * Stream
+         * @description 会话事件流（跨进程）。
+         *
+         *     事件来源是 `agent_events` 表而不是进程内 broker：轮次在 worker 进程执行，
+         *     浏览器连的是 API 进程，内存队列跨不过进程边界（见 `agent/live.py`）。
+         *     `last_event_id`（或 `Last-Event-ID` 头）是事件 rowid，可用于断线续传。
+         */
         get: operations["stream_api_admin_agent_sessions__session_id__stream_get"];
         put?: never;
         post?: never;
@@ -1299,8 +1306,34 @@ export type paths = {
         delete?: never;
         options?: never;
         head?: never;
-        /** Patch Config */
+        /**
+         * Patch Config
+         * @description 保存 Agent 模型配置（白名单 + 取值校验），并立刻做一次能力解析。
+         *
+         *     只写白名单键：过去这里把任意 dict 直接落库，`credential_id` 打错、`provider`
+         *     写成 `zhipu` 都能存进去，错误要等到发消息时才以「网关拒绝」的形式出现。
+         */
         patch: operations["patch_config_api_admin_agent_config_patch"];
+        trace?: never;
+    };
+    "/api/admin/agent/config/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Config
+         * @description 真实打一次模型（最小请求），把结果作为「Agent 可用」的证据。
+         */
+        post: operations["test_config_api_admin_agent_config_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/admin/agent/connectivity": {
@@ -5594,6 +5627,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_config_api_admin_agent_config_test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
                 };
             };
         };

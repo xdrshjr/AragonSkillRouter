@@ -306,6 +306,13 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
         setQueuedCount((count) => Math.max(0, count - 1));
         setMessages((prev) => {
           const next = [...prev];
+          // 排队的消息被推起来时摘掉它的「排队中（第 N 条）」徽标：队列是 FIFO，
+          // 最老的那条就是刚开始执行的这条（否则徽标会一直挂到刷新页面）。
+          const queuedIndex = next.findIndex((m) => m.queuePosition !== undefined);
+          const queuedMessage = queuedIndex >= 0 ? next[queuedIndex] : undefined;
+          if (queuedMessage) {
+            next[queuedIndex] = { ...queuedMessage, queuePosition: undefined };
+          }
           const lastAssistant = [...next].reverse().find((m) => m.role === 'assistant' && m.streaming);
           if (lastAssistant) return next;
           next.push({

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
@@ -14,6 +11,7 @@ from ...deps import page_params, require_password_changed
 from ...errors import ApiError, Code
 from ...schemas.agent import MessageRequest, RetryRequest, SessionCreate, StopRequest
 from ...security.sessions import SessionContext
+from ...services import agent_model, agent_queue
 from ...services import settings as settings_service
 from ...services import tasks as task_service
 from ...sse import broker
@@ -43,6 +41,16 @@ async def get_session(session_id: str, ctx: SessionContext = Depends(require_pas
 async def send_message(
     session_id: str, payload: MessageRequest, ctx: SessionContext = Depends(require_password_changed)
 ) -> dict:
+    # 先确认这一轮有可用的模型与凭证：否则排进队列后网关会拒绝整轮，
+    # 面板只会看到一轮永远「执行中」且没有任何事件（历史缺陷）。
+    resolution = agent_model.resolve()
+    if not resolution.ready:
+        raise ApiError(
+            Code.VALIDATION_FAILED,
+            message="Agent 模型未配置完整，无法发送",
+            hint="到「设置 → Agent 模型」填 provider / 模型名并选择凭证；保存后点「测试连通性」",
+            details={"problems": resolution.problems},
+        )
     queued = agent_sessions.queue_turn(session_id, payload.model_dump(), actor=ctx.admin_id)
     agent_sessions.append_user_event(queued["turn_id"], session_id, payload.text)
     if queued["queue_position"]:
@@ -84,34 +92,23 @@ async def send_message(
 async def stream(
     session_id: str, request: Request, ctx: SessionContext = Depends(require_password_changed)
 ) -> StreamingResponse:
-    last_event_id = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id")
-    turn_id = request.query_params.get("turn_id")
+    """会话事件流（跨进程）。
 
-    async def generator():
-        queue = broker.subscribe("agent")
+    事件来源是 `agent_events` 表而不是进程内 broker：轮次在 worker 进程执行，
+    浏览器连的是 API 进程，内存队列跨不过进程边界（见 `agent/live.py`）。
+    `last_event_id`（或 `Last-Event-ID` 头）是事件 rowid，可用于断线续传。
+    """
+    raw_last = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id")
+    start_cursor: int | None = None
+    if raw_last is not None and str(raw_last).strip() != "":
         try:
-            cursor = int(last_event_id) if last_event_id and str(last_event_id).isdigit() else 0
-            replay: list[dict] = []
-            if turn_id:
-                replay = [e for e in agent_events.list_events(turn_id) if e["seq"] > cursor]
-            for event in replay:
-                yield f"id: {event['seq']}\nevent: {event['type']}\ndata: {json.dumps(event['payload'], ensure_ascii=False)}\n\n"
-            yield ": connected\n\n"
-            while True:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=15)
-                except TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
-                payload = event.get("payload") or {}
-                if payload.get("session_id") and payload["session_id"] != session_id:
-                    continue
-                seq = payload.get("seq") or event.get("id")
-                yield f"id: {seq}\nevent: {event['type']}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-        finally:
-            broker.unsubscribe("agent", queue)
+            start_cursor = int(str(raw_last).strip())
+        except ValueError:
+            start_cursor = None
 
-    return sse_response(generator())
+    from ...agent import live
+
+    return sse_response(live.tail(session_id, start_cursor))
 
 
 @router.post("/sessions/{session_id}/stop")
@@ -142,6 +139,8 @@ async def stop(
     }
     result = agent_sessions.stop(session_id, turn_id, normalized)
     broker.publish("agent", "turn.stopped", {"session_id": session_id, **normalized})
+    # 停止之后同样要把排队的那条推起来：否则「已停止」之后队列永久静止
+    agent_queue.start_next(session_id)
     return result
 
 
@@ -150,7 +149,10 @@ async def retry(
     session_id: str, payload: RetryRequest, ctx: SessionContext = Depends(require_password_changed)
 ) -> dict:
     queued = agent_sessions.retry_turn(session_id, payload.model_dump())
-    task_service.enqueue("agent_turn", {"session_id": session_id, "turn_id": queued["turn_id"]}, priority=6)
+    # 有轮次正在跑时，重试只能排队：此时**不能**入队，否则两条轮次会同时执行
+    # （同一会话的顺序被打破，网关里也会有两个 agent 抢同一份上下文）。
+    if not queued["queue_position"]:
+        task_service.enqueue("agent_turn", {"session_id": session_id, "turn_id": queued["turn_id"]}, priority=6)
     return queued
 
 
@@ -166,8 +168,11 @@ async def archive(session_id: str, ctx: SessionContext = Depends(require_passwor
 async def get_config(ctx: SessionContext = Depends(require_password_changed)) -> dict:
     from ...agent import toolspec
 
+    resolution = agent_model.resolve()
     return {
         "model": settings_service.agent_config(),
+        "effective": resolution.as_dict(),
+        "providers": list(agent_model.PROVIDER_IDS),
         "tools": toolspec.TOOL_SPECS,
         "policy": settings_service.read_agent_policy(),
     }
@@ -175,7 +180,24 @@ async def get_config(ctx: SessionContext = Depends(require_password_changed)) ->
 
 @router.patch("/config")
 async def patch_config(payload: dict, ctx: SessionContext = Depends(require_password_changed)) -> dict:
-    return {"model": settings_service.update_agent_config(payload, actor=ctx.admin_id)}
+    """保存 Agent 模型配置（白名单 + 取值校验），并立刻做一次能力解析。
+
+    只写白名单键：过去这里把任意 dict 直接落库，`credential_id` 打错、`provider`
+    写成 `zhipu` 都能存进去，错误要等到发消息时才以「网关拒绝」的形式出现。
+    """
+    cleaned = agent_model.validate_patch(payload)
+    model = settings_service.update_agent_config(cleaned, actor=ctx.admin_id)
+    resolution = agent_model.resolve()
+    return {
+        "model": model,
+        "effective": resolution.as_dict(),
+    }
+
+
+@router.post("/config/test")
+async def test_config(ctx: SessionContext = Depends(require_password_changed)) -> dict:
+    """真实打一次模型（最小请求），把结果作为「Agent 可用」的证据。"""
+    return await agent_model.check()
 
 
 @router.post("/connectivity")
@@ -183,10 +205,15 @@ async def connectivity(ctx: SessionContext = Depends(require_password_changed)) 
     from ...agent.client import get_adapter
 
     try:
-        return {"ok": True, **(await get_adapter().connectivity())}
+        return {
+            "ok": True,
+            "model": agent_model.resolve().as_dict(),
+            **(await get_adapter().connectivity()),
+        }
     except ApiError as exc:
         return {
             "ok": False,
+            "model": agent_model.resolve().as_dict(),
             "error": {"code": exc.code, "message": exc.message, "hint": exc.hint},
             "gateway": {"ok": False},
         }

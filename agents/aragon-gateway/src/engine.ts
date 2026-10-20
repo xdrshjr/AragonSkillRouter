@@ -553,15 +553,20 @@ export class EngineRuntime {
   }
 
   private resolveModel(request: TurnRequest): AgentModelRef {
-    const providerId = request.model?.providerId ?? this.config.model.providerId;
-    const modelId = request.model?.modelId ?? this.config.model.modelId;
+    // `model` may arrive as a bare model id (legacy platform build). Normalising here
+    // keeps `{providerId, modelId, baseUrl}` as the only shape used downstream.
+    const raw = request.model;
+    const requested: Partial<AgentModelRef> =
+      typeof raw === 'string' ? { modelId: raw } : (raw ?? {});
+    const providerId = requested.providerId || this.config.model.providerId;
+    const modelId = requested.modelId || this.config.model.modelId;
     if (providerId === '' || modelId === '') {
       throw new TurnConflictError(
         'no model configured for this turn: send model{providerId,modelId} in the turn request ' +
           'or set AGENT_MODEL_PROVIDER / AGENT_MODEL_ID',
       );
     }
-    const baseUrl = request.model?.baseUrl ?? this.config.model.baseUrl;
+    const baseUrl = requested.baseUrl ?? this.config.model.baseUrl;
     return { providerId, modelId, ...(baseUrl === undefined ? {} : { baseUrl }) };
   }
 

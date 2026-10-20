@@ -912,3 +912,184 @@ cd apps\web && npx tsc --noEmit
 1. `taskkill /T /F` 只在「优雅 exit 超时」后触发 —— spec §2.10 的原文顺序就是如此；
    `clean_shutdown`（§12.4）在真实关停下为绿，本轮不擅自改变关停语义。
 2. `E-D06` 仍不作为错误码存在（spec §2.3.2 已改为 `W-D06` 警告级），runbook 里那行是「它不是错误码」的说明。
+
+---
+
+## 13. 第 5 轮：真实模型凭证把「内置 Agent 真能用」跑通（2026-10-20）
+
+**这一轮的目标不是加功能，而是把 README 里挂着的
+「内置 Agent 真实模型推理 = 待验证」变成有证据的已实现。**
+凭证是真实的第三方模型（智谱 GLM，Anthropic 兼容协议），命令与输出都在下面。
+
+### 13.1 复现方式（有头浏览器，可肉眼跟随）
+
+```cmd
+cd apps\web
+set SR_E2E_ADMIN_USER=admin
+set SR_E2E_ADMIN_PASSWORD=<已改密的密码>
+set SR_LIVE_AGENT=1
+set SR_E2E_CREDENTIAL_MATCH=GLM
+set SR_BASE_URL=http://127.0.0.1:3000
+set SR_E2E_CHANNEL=msedge          :: 本机无 playwright 自带 chromium 时的兜底
+set SR_E2E_SLOWMO=350              :: 慢动作，便于肉眼跟每一步
+set SR_E2E_HOLD_MS=30000           :: 结束后窗口保留 30s
+npx playwright test e2e/agent-live.spec.ts --headed --project=chromium --reporter=list --workers=1
+```
+
+输出（真实）：
+
+```text
+  ok 1 [chromium] › e2e\agent-live.spec.ts:63:7 › Agent 真实闭环（有头） › 配置模型 → 测试连通性 → Agent 调用平台工具 (1.1m)
+  1 passed (1.2m)
+```
+
+截图逐张落在 `var/dev/shots/`：`02-overview` → `03-agent-model-page` → `04-agent-model-filled`
+→ `05-agent-model-saved` → `06-connectivity-result` → `07-agent-workbench` → `08-agent-prompt-typed`
+→ `09-agent-tool-called` → `10-agent-turn-finished`。
+
+### 13.2 真实证据（不是「看起来能跑」）
+
+| 环节 | 证据 |
+|---|---|
+| 连通性测试 | 页面 `连通性测试` 区域：**通过** · `模型正常回话` · HTTP **200** · 耗时 **5616 ms** · `anthropic / glm-5.3-flash` |
+| 探活接口 | `POST /api/admin/agent/config/test` → `{"ok":true,"checked":true,"status":200,"transport":"proxy","text_chars":2,...}` |
+| 一轮对话 | `agent_turns.status = succeeded`，`turn.finished` 事件带 `usage {inputTokens:10364, outputTokens:342}`、`duration_ms 15449`、`iterations 2` |
+| 工具调用 | `tool.started` / `tool.finished` 各一条：`sr_capabilities_list`，`ok:true`，`duration_ms:59`，结果 `{"ok":true,"capabilities":[{"key":"text.generate.echo3",...}],"matched":1,"total":1,"truncated":false}` |
+| 界面呈现 | 对话区出现 Agent 回复：「工具可用：`sr_capabilities_list` 调用成功（ok=true），limit=5 下实际返回 **1 条**能力——`text.generate.echo3`…」；状态徽标回到「空闲」 |
+| 事件全链路 | 该轮共 **163** 条事件落库（`agent_events`），`rowid` 单调递增 |
+
+### 13.3 这一轮挖出并修掉的 4 个真实缺陷
+
+四个都是「代码在、看起来对、但这条链路其实不通」。
+
+| # | 位置 | 缺陷 | 修复 |
+|---|---|---|---|
+| A-1 | `apps/api/skillrouter_api/worker/handlers/agent_turn.py` | 把 `agent_model.model`（**字符串**）塞进轮次请求的 `model` 字段，且**从不发** `credential_refs` → 网关每次都回 `TURN_CONFLICT: no model configured for this turn` | 新增 `services/agent_model.py` 做唯一翻译层：`resolve()` 产出 `model{providerId,modelId,baseUrl}` + `credential_refs{providerId:credential_id}`；配置不全时**当场**把轮次置 `failed` 并给出可操作提示，不再排进队列干等 |
+| A-2 | 同上 + `agents/aragon-gateway/src/engine-host.ts` | `ingest_stream()` **没有任何调用方**：网关的事件从来不落库；且引擎子进程拒绝轮次时只写日志就 `finishTurn`，平台侧轮次**永久 running、0 事件** | worker 接单后 `await ingest_stream(...)` 直到终态（含超时/断流兜底，全部写成 `failed`，绝不留永久 running）；子进程拒绝时补发 `turn.failed`（`rejectedTurnPayload()`） |
+| A-3 | `apps/api/skillrouter_api/api/admin/agent_chat.py` | SSE 从**进程内 broker** 取事件，而轮次在 **worker 进程**执行 —— 内存队列跨不过进程边界，浏览器一条都收不到 | 事件源改为权威表 `agent_events`（P04），新增 `agent/live.py`：`rowid` 作游标、`latest_cursor/session_cursor/events_after/tail`，并支持 `last_event_id` 断线续传 |
+| A-4 | `agent/live.py::frame()` + `apps/web/lib/sse.ts` | 帧里写了 `event: <type>` → 浏览器 EventSource **不会**派发到 `onmessage`（命名事件只触发同名监听器），163 条事件全被丢弃 | 服务端只发 `id:` + `data:`；前端同时注册 13 个平台事件名做双保险（两种格式都能工作，协议细节不该由「哪一端先改」决定可用性） |
+
+顺带修掉的两个「配置能存进去、但永远是错的」：
+
+- `PATCH /agent/config` 过去接受任意 dict（`provider=zhipu`、写错的 `credential_id` 都能落库），
+  现在走 `agent_model.validate_patch()`：白名单键 + 协议族枚举 + 凭证存在性 + 数值范围。
+- `update_agent_config()` 过去用 `if v is not None` 过滤，导致 `base_url` / `credential_id`
+  **想清空却清不掉**；现在允许显式 `null`。
+
+以及网关侧两个「永远返回空」的读取缺陷：
+
+- `normalizeCatalog()` 只读 `{capabilities}`，而平台返回 `{items:[...]}` → `sr_capabilities_list`
+  恒为空。现在兼容 `items`/`data`，并把 `modes[]` 投影成 `mode`（否则按 mode 过滤会全丢）。
+- `POST /internal/turns` 的入参校验补上 `model` / `credential_refs` 形状，`resolveModel()`
+  兼容「裸字符串当 modelId」（旧平台客户端）。
+
+### 13.4 新增的回归（都对着真实缺陷写，不是凑数）
+
+| 套件 | 文件 | 覆盖 |
+|---|---|---|
+| pytest | `apps/api/tests/test_agent_model.py`（17 例） | 翻译层形状、自动选凭证、配置校验（未知 provider / 未知键 / 未知凭证）、未配置时拒绝发送、worker 发 `model` 对象 + drain、断流置 failed、探活 200/非 200/只有 thinking |
+| pytest | `apps/api/tests/test_agent_stream.py`（6 例） | 跨进程投递、`Last-Event-ID` 续传、keep-alive、**帧里不得出现 `event:` 行** |
+| vitest | `agents/aragon-gateway/test/regressions.test.ts`（5 例） | `items` 信封、`modes` 投影、mode 过滤、`turn.failed` 的 payload |
+| playwright | `apps/web/e2e/agent-live.spec.ts`（1 例，需真实凭证） | 配置 → 连通性 → 一轮对话 → 工具调用 → 回到空闲（**1 passed**） |
+| playwright | `apps/web/e2e/agent-stop.spec.ts`（1 例，需真实凭证） | 长任务中途停止 → StopReport + 对账入口 + 不再是「执行中」（**1 passed**） |
+
+### 13.5 本轮实测命令与结果
+
+```text
+# 后端
+cd apps/api && python -m pytest tests -q                         → 全部通过
+cd apps/api && python -m ruff check tests skillrouter_api        → All checks passed!
+cd apps/api && python -m mypy skillrouter_api                    → Success: no issues found in 138 source files
+
+# 网关
+cd agents/aragon-gateway && npx tsc --noEmit                     → 0 error
+cd agents/aragon-gateway && npx vitest run                       → 53 passed（5 文件，原 48 + 5）
+
+# 前端
+cd apps/web && npx tsc --noEmit                                  → 0 error
+cd apps/web && npx next lint                                     → No ESLint warnings or errors
+
+# 真实闭环（有头）
+cd apps/web && npx playwright test e2e/agent-live.spec.ts --headed  → 1 passed (1.2m)
+```
+
+OpenAPI 已随实现重新导出（新增 `POST /api/admin/agent/config/test`，`/agent/config` 响应多了
+`effective`/`providers`，共 **118 paths**：v1=14 / admin=96 / internal=5）：
+
+```text
+# 注意：**不要**用 `> docs/api/openapi.json` 这种 shell 重定向。
+# cmd.exe 会按控制台代码页（GBK）落盘，把整份构建产物写成非 UTF-8，所有消费方都会踩坑
+# （本轮就发生过：文件被写成 GBK + CRLF，git 里 232 行全变）。正确做法是让 Python 自己写：
+cd apps/api && python -c "import json, skillrouter_api.main as m; open('../../docs/api/openapi.json','w',encoding='utf-8',newline='\n').write(json.dumps(m.create_app().openapi(), ensure_ascii=False, indent=2) + '\n')"
+```
+
+> 另一条纪律：本地 fastapi/pydantic 比 `requirements.txt` 钉住的版本新（0.136/2.14 vs 0.115.6/2.9.2），
+> 直接导出会多出 `additionalProperties: true`（130 处）、`contentMediaType` 取代 `format: binary`、
+> `ValidationError` 多 `input`/`ctx`。这些是**环境差异**而不是契约变化，提交它们会让 CI 的漂移检查红。
+> 导出后请确认 `git diff docs/api/openapi.json` 只包含本次真实新增的路由/描述。
+
+### 13.6 停止报告（StopReport）也跑通了
+
+`apps/web/e2e/agent-stop.spec.ts`（有头，真实模型）：发一轮「连续调工具」的长任务 →
+徽标变「执行中」→ 点「停止」→ 界面出现
+
+```text
+已停止：sr_capabilities_list（已完成）…
+可能仍在远端运行：…        （external_pending 非空时展示）
+去任务里对账 →
+```
+
+并且「执行中」徽标**消失**（不会卡在运行态）。本轮结果 **1 passed (26.5s)**，
+截图 `var/dev/shots/stop-03-stopped.png`、`stop-04-idle-after-stop.png`。
+
+本轮修掉的相关缺陷：`turn.stopped` 之前只由 API 进程的 `broker.publish` 广播，
+worker 进程的 `agent_events` 落库事件到不了浏览器（A-3）；改成表驱动后停止报告才真的可见。
+
+### 13.7 本轮仍未闭环（口径不变）
+
+- **非 Anthropic 协议族**（openai / google 两条 `_probe_request` 分支）只有单测桩，
+  没有真实上游凭证——按规矩保持「待验证」，不因代码在就改状态。
+- §13.1 / §13.6 的两个 e2e **默认 skip**（`SR_LIVE_AGENT=1` 才跑），CI 不跑真实模型。
+  这与「e2e skipped ≠ verified」的既有口径一致：**证据在本文档，不在流水线**。
+- 本轮新增的两条 e2e 需要 `SR_E2E_ADMIN_PASSWORD`（已改密的密码）；密码丢失时用
+  `python scripts/bootstrap.py reset-admin-password --user admin` 重置后再跑。
+
+### 13.8 顺带修掉的一条既有用例自相矛盾
+
+`apps/web/e2e/core-loop.spec.ts` 里先硬断言「能力状态含『测试通过』」，紧接着又假设
+「『未测试』时发布按钮禁用」——任何未测试的能力都会让它必红（本轮实测红过一次）。
+现已改为：`已保存` 必断言 ± `测试通过|未测试` 二选一，仅在「未测试」时才要求发布禁用。
+同一文件里还有一处 `getByText('执行中')` 的歧义（徽标 vs 输入框提示），已改 `exact: true`。
+
+### 13.9 复审（同一批未提交改动）补修的 6 个问题
+
+把 §13.1–13.8 的改动整体复审了一遍，又找出并修掉下面这些。它们都不是新功能，而是
+「同一类缺陷换了个状态字 / 换了个出错位置」。
+
+| # | 位置 | 问题 | 修复 |
+|---|---|---|---|
+| B-1 | `agent/sessions.py` + `services/agent_queue.py` | `queue_turn()` 会把「执行中又发一条」记成 `queued`，输入框也明确写着「会排队」，但**没有任何代码**把 `queued` 推进成 `running` → 永久「排队中（第 N 条）」，且它会继续挡住之后的新消息（queued 也算 busy）。与 A-2 的「永久 running」同类 | 新增 `sessions.dequeue_next()`（CAS：`WHERE status='queued'`，不会双跑）+ `services/agent_queue.start_next()`；worker 收尾、模型未配置失败、用户停止三处都调用 |
+| B-2 | `api/admin/agent_chat.py::retry` | 重试不看有没有在跑的轮次，**无条件** `enqueue`：同一会话会有两轮并发（顺序被打破，网关里两个 agent 抢同一份上下文） | 只有 `queue_position == 0` 才入队，否则等 B-1 的推进 |
+| B-3 | `worker/handlers/agent_turn.py::ingest_stream` | `httpx.Timeout(read=None)`：网关「TCP 还在但不再说话」时读会一直阻塞，直到 handler 1800s 超时被取消——那一轮就没人写终态，正好违反「绝不留永久 running」 | 读空闲上限 `STREAM_IDLE_TIMEOUT_S=90`（网关每 15s 一条 `: keep-alive`，90s 无字节即连接已死）；超时走 `AGENT_STREAM_LOST` 落 `failed` |
+| B-4 | `services/agent_model.py::check` | 解析之后凭证可能刚好被停用/删除，`materialize()` 抛 `ApiError` → `POST /agent/config/test` 直接 500，把「凭证不可用」误报成平台故障 | 包成 `{ok:false, checked:false, problems:[...]}`；`secret` 为空同样给结论 |
+| B-5 | `apps/web/.../settings/agent/page.tsx` | 保存新配置后，上一次「连通性测试通过」的徽标**留在页面上**（旧结论冒充当前配置的结论）；`温度 / max_tokens` 标成「当前生效」，但网关只读自己的 `AGENT_MODEL_MAX_TOKENS`，平台这两个值**根本不发送** | 保存成功即清空测试结果；两处文案改为「只保存不生效」 |
+| B-6 | `docs/api/openapi.json` + `packages/contracts/src/api.d.ts` | 用 `> docs/api/openapi.json` 导出，cmd.exe 按 GBK 落盘：整份构建产物变成**非 UTF-8 + CRLF**（git 里 232 行全变），`openspec`/`openapi-typescript` 之类消费方按 UTF-8 读会直接抛错；而且只改了 `openapi.json`、没重新生成 `api.d.ts` → CI 的 `contracts diff` 作业必红 | 用 Python 自己以 `encoding='utf-8', newline='\n'` 写回，并抹平本地版本漂移（见 §13.5 的告示）；`npm run gen` 重新生成 `api.d.ts`。现在 `openapi.json` 的 `git diff` 只剩 **+25 行**（新路由 + 两处 docstring 变成 `description`），`api.d.ts` 只剩 **+55/−2** |
+
+顺带的两条小修：`POST /agent/config/test` 里 `result["request_id"] = None` 是空操作（删）；
+`validate_patch` 对 `max_test_calls_per_flow` / `allowed_window_hours` / `max_cost_usd_per_flow`
+补了下界（负数没有意义，之前能存进去）。
+
+新增回归 `apps/api/tests/test_agent_queue.py`（**11 例**）：`dequeue_next` 在轮次运行时不推进 /
+按 ordinal 推进最老的一条 / 重编号剩余队列、`start_next` 真的入队、推进后排不进队列时
+把轮次收成 `failed`（不留没人执行的 running）、worker 正常收尾后推进、模型未配置时也推进
+（否则修好配置会被一条旧消息挡住）、停止后推进、重试在排队时**不**入队、
+`check()` 对停用凭证给结论而不是抛异常、`validate_patch` 拒绝负数。
+
+```text
+cd apps/api && python -m pytest tests -q      → 285 passed（31 文件，原 274 + 11）
+cd apps/api && python -m ruff check .         → All checks passed!
+cd apps/api && python -m mypy skillrouter_api → Success: no issues found in 139 source files
+cd apps/web && npx tsc --noEmit               → 0 error
+cd apps/web && npx next lint                  → No ESLint warnings or errors
+cd packages/contracts && npm run gen:check    → 检查通过（api.d.ts 已随 openapi.json 重新生成）
+```

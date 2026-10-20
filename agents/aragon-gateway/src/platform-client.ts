@@ -47,6 +47,7 @@ export interface CapabilitySummary {
   name?: string;
   kind?: string;
   mode?: string;
+  modes?: string[];
   status?: string;
   [key: string]: unknown;
 }
@@ -309,19 +310,39 @@ export class PlatformClient {
 function normalizeCatalog(raw: unknown): CapabilityCatalog {
   const fetched_at = new Date().toISOString();
   if (Array.isArray(raw)) {
-    return { capabilities: raw.filter(isCapability), fetched_at };
+    return { capabilities: raw.filter(isCapability).map(normalizeCapability), fetched_at };
   }
   if (raw !== null && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>;
-    const list = obj['capabilities'];
+    // The platform answers `GET /internal/capabilities` with `{items: [...]}`
+    // (`api/internal.py`); reading only `capabilities` made `sr_capabilities_list`
+    // always return an empty catalogue even when the platform had published abilities.
+    const list = obj['capabilities'] ?? obj['items'] ?? obj['data'];
     const etag = typeof obj['etag'] === 'string' ? obj['etag'] : undefined;
     return {
-      capabilities: Array.isArray(list) ? list.filter(isCapability) : [],
+      capabilities: Array.isArray(list) ? list.filter(isCapability).map(normalizeCapability) : [],
       ...(etag === undefined ? {} : { etag }),
       fetched_at,
     };
   }
   return { capabilities: [], fetched_at };
+}
+
+/**
+ * Fill in the fields the tools filter on.
+ *
+ * The platform's catalogue exposes `modes: string[]` (there is no single `mode`) and
+ * only lists published+enabled rows (there is no `status`). Without this projection
+ * `sr_capabilities_list` filtered every row out whenever `mode` was supplied.
+ */
+function normalizeCapability(cap: CapabilitySummary): CapabilitySummary {
+  const row: CapabilitySummary = { ...cap };
+  const modes = Array.isArray(cap['modes']) ? (cap['modes'] as unknown[]) : [];
+  const firstMode = modes.find((m): m is string => typeof m === 'string');
+  if (row.mode === undefined && firstMode !== undefined) row.mode = firstMode;
+  if (row.modes === undefined && modes.length > 0) row.modes = modes as string[];
+  if (row.status === undefined) row.status = 'published';
+  return row;
 }
 
 function isCapability(value: unknown): value is CapabilitySummary {

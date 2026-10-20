@@ -10,7 +10,7 @@
 import { PlatformError } from '../platform-client.js';
 import { buildTool, type PlatformTool, type ToolDeps } from './index.js';
 
-const SUMMARY_FIELDS = ['key', 'name', 'kind', 'mode', 'status'] as const;
+const SUMMARY_FIELDS = ['key', 'name', 'kind', 'mode', 'modes', 'status'] as const;
 
 export function createCapabilitiesListTool(deps: ToolDeps): PlatformTool {
   return buildTool<{ query?: string; kind?: string; mode?: string; limit?: number }>(
@@ -41,7 +41,12 @@ export function createCapabilitiesListTool(deps: ToolDeps): PlatformTool {
         const needle = args.query?.trim().toLowerCase() ?? '';
         const rows = catalog.capabilities.filter((cap) => {
           if (args.kind !== undefined && String(cap.kind ?? '') !== args.kind) return false;
-          if (args.mode !== undefined && String(cap.mode ?? '') !== args.mode) return false;
+          // A capability can support several modes (`modes: string[]`); matching only a
+          // single `mode` field would drop every multi-mode capability.
+          if (args.mode !== undefined) {
+            const modes = cap.modes ?? (cap.mode === undefined ? [] : [cap.mode]);
+            if (!modes.includes(args.mode)) return false;
+          }
           if (needle === '') return true;
           const haystack = `${cap.key} ${String(cap.name ?? '')}`.toLowerCase();
           return haystack.includes(needle);

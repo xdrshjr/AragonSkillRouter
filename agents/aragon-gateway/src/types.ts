@@ -98,7 +98,15 @@ export interface TurnRequest {
   /** History to replay into the engine before prompting (newest last). */
   messages?: TurnMessage[];
   system_prompt?: string;
-  model?: AgentModelRef;
+  /**
+   * Model for this turn.
+   *
+   * The contract (spec §9.5) is the object shape `{providerId, modelId, baseUrl?}`.
+   * A bare **string** is still accepted as `modelId` with the configured provider,
+   * because that is what older platform builds sent — silently accepting it here is
+   * better than rejecting the whole turn with "no model configured".
+   */
+  model?: AgentModelRef | string;
   budget?: TurnBudget;
   /**
    * The user text for this turn. Optional because spec §9.5 describes the body as
@@ -230,7 +238,7 @@ export interface VerifyRequest {
 export type HostToParentFrame =
   | { type: 'ready'; engine: { version: string; package: string; schema_version: number }; tools: string[] }
   | { type: 'event'; turn_id: string; event: PlatformEvent }
-  | { type: 'turn_finished'; turn_id: string; ok: boolean; detail?: string }
+  | { type: 'turn_finished'; turn_id: string; ok: boolean; detail?: string; code?: string }
   | { type: 'stopped'; turn_id: string; report: StopReport }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; message: string }
   | { type: 'fatal'; message: string };

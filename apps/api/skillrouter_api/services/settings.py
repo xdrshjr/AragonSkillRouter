@@ -121,8 +121,13 @@ def agent_config() -> dict:
 
 
 def update_agent_config(patch: dict, *, actor: str | None = None) -> dict:
+    """保存 Agent 模型配置（键的校验在 `services.agent_model.validate_patch`）。
+
+    这里**允许**显式写 `None`：清空 `base_url` / `credential_id` 是合法操作，
+    旧实现用 `if v is not None` 过滤，导致「想清空却清不掉」。
+    """
     current = dict(get_value("agent_model", {}) or {})
-    current.update({k: v for k, v in patch.items() if v is not None})
+    current.update(patch)
     with db_write() as s:
         row = s.get(Setting, "agent_model")
         if row is None:

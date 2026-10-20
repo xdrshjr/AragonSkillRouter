@@ -33,11 +33,20 @@ class SessionSpec:
 
 @dataclass
 class TurnRequest:
+    """一轮 Agent 请求（spec §9.5）。
+
+    `model` 必须是网关认识的**对象** `{providerId, modelId, baseUrl?}`，`credential_refs`
+    是 `{providerId: credential_id}`：网关不读环境变量里的密钥，也不认识平台的提供商
+    UUID（§4.3）。把 `model` 写成字符串会让网关回 `TURN_CONFLICT: no model configured`
+    —— 这是「Agent 面板永远没有回复」的根因，因此类型在这里被收紧。
+    """
+
     turn_id: str
     messages: list[dict[str, Any]]
     budget: dict[str, Any] = field(default_factory=dict)
-    model: str | None = None
+    model: dict[str, Any] | None = None
     system_prompt: str | None = None
+    credential_refs: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -122,7 +131,9 @@ class AragonAgentAdapter:
             "turn_id": turn.turn_id,
             "messages": turn.messages,
             "system_prompt": turn.system_prompt,
-            "model": turn.model or settings.agent_model,
+            # 只发网关能用的形状；字符串/空值会让网关拒绝整轮（§9.5）
+            "model": turn.model,
+            "credential_refs": turn.credential_refs,
             "budget": turn.budget or {"max_turns": 40, "max_duration_ms": 600_000},
         }
         try:

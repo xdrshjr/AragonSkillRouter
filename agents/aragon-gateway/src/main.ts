@@ -223,6 +223,24 @@ export function buildGateway(options: GatewayOptions): Gateway {
     if (turn.budget !== undefined && (typeof turn.budget !== 'object' || turn.budget === null)) {
       return reply.code(400).send(errorBody(request, 'INVALID_BODY', 'budget must be an object'));
     }
+    const model = (turn as unknown as Record<string, unknown>)['model'];
+    if (model !== undefined && model !== null && typeof model !== 'object' && typeof model !== 'string') {
+      return reply
+        .code(400)
+        .send(
+          errorBody(
+            request,
+            'INVALID_BODY',
+            'model must be {providerId,modelId,baseUrl?} (a bare string is accepted as modelId)',
+          ),
+        );
+    }
+    const refs = (turn as unknown as Record<string, unknown>)['credential_refs'];
+    if (refs !== undefined && refs !== null && (typeof refs !== 'object' || Array.isArray(refs))) {
+      return reply
+        .code(400)
+        .send(errorBody(request, 'INVALID_BODY', 'credential_refs must be {providerId: credential_ref}'));
+    }
 
     try {
       const accepted = await engine.startTurn(turn, request.id);

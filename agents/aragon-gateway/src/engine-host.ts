@@ -34,6 +34,7 @@ import {
   DRAIN_TIMEOUT_MS,
   EngineRuntime,
   EngineUnavailableError,
+  TurnConflictError,
   describeError,
   loadCore,
 } from './engine.js';
@@ -57,6 +58,23 @@ import {
 export const READY_TIMEOUT_MS = 60_000;
 /** How long a closed child may take to exit after `shutdown`. */
 export const CLOSE_TIMEOUT_MS = 10_000;
+
+/**
+ * The `turn.failed` payload for a turn the engine child refused.
+ *
+ * Exported so the "a rejected turn must not hang the platform" contract is testable
+ * without spawning a child: logging the rejection and finishing the turn silently is
+ * what left every turn stuck in `running` with zero events (the bug this fixes).
+ */
+export function rejectedTurnPayload(frame: { detail?: string; code?: string }): Record<string, unknown> {
+  return {
+    code: frame.code ?? 'ENGINE_TURN_REJECTED',
+    hint:
+      '引擎拒绝了这一轮：检查 Agent 模型配置（provider / 模型名 / base_url）' +
+      '与凭证引用（credential_refs）是否正确',
+    message: frame.detail ?? 'engine child rejected the turn',
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Child role
@@ -194,7 +212,14 @@ async function runChild(argv: string[]): Promise<void> {
           }
           writeFrame({ type: 'notice', level: 'info', message: `turn ${accepted.turn_id} accepted` });
         } catch (err) {
-          writeFrame({ type: 'turn_finished', turn_id: frame.request.turn_id, ok: false, detail: describeError(err) });
+          const code = err instanceof TurnConflictError ? 'TURN_CONFLICT' : 'TURN_ACCEPT_FAILED';
+          writeFrame({
+            type: 'turn_finished',
+            turn_id: frame.request.turn_id,
+            ok: false,
+            code,
+            detail: describeError(err),
+          });
         }
         return;
       }
@@ -583,8 +608,15 @@ export class HostSupervisor {
           case 'turn_finished': {
             const turn = this.turns.get(frame.turn_id);
             if (turn) {
-              if (!frame.ok && frame.detail !== undefined) {
+              if (!frame.ok) {
+                // A rejected turn (bad model ref, missing credential, engine error) MUST
+                // surface as `turn.failed`: logging it and finishing the turn silently
+                // leaves the platform's turn stuck in `running` with zero events, which
+                // is exactly what the Agent panel showed before this fix.
                 this.logger.warn('engine_host.turn_rejected', { turn_id: frame.turn_id, detail: frame.detail });
+                if (!turn.finished) {
+                  turn.stream.emit('turn.failed', rejectedTurnPayload(frame));
+                }
               }
               this.finishTurn(turn);
             }

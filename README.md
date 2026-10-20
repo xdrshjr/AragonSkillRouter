@@ -13,9 +13,9 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=next.js&logoColor=white)](apps/web/package.json)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](apps/api/requirements.txt)
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](db/)
-[![tests](https://img.shields.io/badge/tests-345%20passed-brightgreen)](#质量与证据)
+[![tests](https://img.shields.io/badge/tests-386%20passed-brightgreen)](#质量与证据)
 [![ci](https://github.com/xdrshjr/AragonSkillRouter/actions/workflows/ci.yml/badge.svg)](https://github.com/xdrshjr/AragonSkillRouter/actions/workflows/ci.yml)
-[![API](https://img.shields.io/badge/OpenAPI-117%20paths-85EA2D?logo=openapiinitiative&logoColor=black)](docs/api/openapi.json)
+[![API](https://img.shields.io/badge/OpenAPI-118%20paths-85EA2D?logo=openapiinitiative&logoColor=black)](docs/api/openapi.json)
 [![license](https://img.shields.io/badge/license-proprietary-red)](packages/skillrouter-cli/package.json)
 
 [快速开始](#3-分钟跑起来) · [架构](#架构) · [端到端示例](#端到端一个能力从零到被-agent-调用) ·
@@ -338,17 +338,17 @@ curl -sS -X POST "$SR_BASE/api/v1/capabilities/text.generate.echo/invoke" \
 
 | 套件 | 命令 | 结果 |
 |---|---|---|
-| 后端全量 | `cd apps/api && python -m pytest tests -q` | **251 passed**（28 个文件） |
-| Agent 网关 | `cd agents/aragon-gateway && npx vitest run` | **48 passed**（4 个文件） |
+| 后端全量 | `cd apps/api && python -m pytest tests -q` | **285 passed**（31 个文件） |
+| Agent 网关 | `cd agents/aragon-gateway && npx vitest run` | **53 passed**（5 个文件） |
 | npm CLI | `cd packages/skillrouter-cli && npx vitest run` | **37 passed**（3 个文件） |
-| 浏览器 e2e（有头 Chrome） | `cd apps/web && npx playwright test --headed` | **9 passed / 2 skipped**（2 条需真实模型引擎） |
+| 浏览器 e2e（有头 Chrome） | `cd apps/web && npx playwright test --headed` | **11 passed / 2 skipped**（真实模型 2 条需 `SR_LIVE_AGENT=1`） |
 | 前端类型 / lint / 构建 | `npx tsc --noEmit` / `npx next lint` / `npm run build` | 0 错误 / 0 warning / 构建成功 |
 | 端到端真联调 | `python scripts/e2e_live.py` | **70/70**（真实 uvicorn + 真实 HTTP 上游 + 真实 CLI 安装与调用） |
 | 网关联通 | `python scripts/check_gateway.py` | **12/12**（真实网关进程 + 引擎 0.2.34 + 热切换） |
 | 前端联通 | `python scripts/check_web.py` | **9/9**（Next 反代、X-Request-Id、未登录 401） |
 | 迁移 | `python -m alembic -c migrations/alembic.ini upgrade head` | 49 表 / 56 索引 / 2 触发器，`user_version=2` |
 
-合计 **345 项测试通过**（251 + 48 + 37 + 9），2 项按设计跳过。
+合计 **386 项测试通过**（285 + 53 + 37 + 11），2 项按设计跳过。
 GitHub Actions 上 9 个作业全绿（`e2e (optional)` 按设计跳过，不计入通过）。
 完整命令与输出归档在 [`docs/runbook/verification-report.md`](docs/runbook/verification-report.md)，
 逐项验收状态以 [`verification-checklist.md`](docs/runbook/verification-checklist.md) 为**唯一权威**。
@@ -358,12 +358,16 @@ GitHub Actions 上 9 个作业全绿（`e2e (optional)` 按设计跳过，不计
 | 项 | 为什么 |
 |---|---|
 | 真实第三方凭证联调（文本 / 语音 / 异步 / 跨提供商故障切换） | 本机无真实第三方 Key |
-| 内置 Agent **真实模型推理**（对话 / 工具流 / 停止报告） | 无可用模型凭证；网关未接真实 provider |
 | 真实外部 Agent 安装 → 发现 → 调用（AragonAgent / Claude Code） | 需要真实 Agent 环境 |
 | MCP 真实客户端通路 | 只有契约测试覆盖 |
 | `docker compose up`（compose / Dockerfile / nginx） | 本机无 Docker（YAML 可解析、healthcheck 已做语法校验） |
 | 目标硬件性能基线（4 vCPU / 8 GB / 50 万 `call_logs`） | 未在目标机采样 |
 | 真实候选版本引擎升级（隔离构建 → 验证 → 热切换） | 需要上游发布新版本 + 模型凭证 |
+
+> **已移出本表的项**（原先都挂在这里，现在有可复现的真实环境证据）：
+> **内置 Agent 真实模型推理** —— 用真实凭证（智谱 GLM，Anthropic 兼容协议）在有头浏览器里
+> 跑通「配置模型 → 连通性 200 → 一轮对话 → 调用 `sr_capabilities_list` → 回到空闲」，
+> 命令与输出见 [`docs/runbook/verification-report.md`](docs/runbook/verification-report.md) §13。
 
 > 跳过（skip）**不**计入通过。这条规则同时写在 CI 里：
 > e2e 未开启时流水线会显式打出一条 `warning` 说明「e2e skipped ≠ verified」。
@@ -391,7 +395,7 @@ apps/api/                     FastAPI 服务（api 与 worker 共用镜像）
     worker/                   队列、租约、恢复、handlers
     upgrade/                  引擎检测 → 隔离构建 → 验证 → 热切换 → 回滚
   migrations/                 Alembic
-  tests/                      pytest：单元 / 契约 / 集成（27 文件 / 247 项）
+  tests/                      pytest：单元 / 契约 / 集成（31 文件 / 285 项）
 apps/web/                     Next.js 15 控制台（20 个页面，standalone 输出，/api 反代）
   e2e/                        Playwright：核心闭环 + 浮窗 Agent + 有头巡检
 agents/aragon-gateway/        Node 22 边车：引擎宿主 + 12 个 sr_* 工具 + 事件流

@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Database, KeyRound, Save, ShieldAlert } from 'lucide-react';
+import Link from 'next/link';
 import * as React from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
@@ -262,6 +263,13 @@ export default function SettingsPage() {
             <p className="text-12 text-content-muted">
               当前环境：{settings.data?.env ?? '—'}。生产环境强制 HTTPS Cookie，且禁止开发热重载。
             </p>
+            <div className="flex flex-wrap items-center gap-2 rounded border border-border bg-[var(--sr-surface-sunken)] px-3 py-2 text-12 text-content-muted">
+              <span className="text-content">内置 Agent 用哪个模型：</span>
+              <Link href="/settings/agent" className="text-accent underline-offset-2 hover:underline">
+                Agent 模型
+              </Link>
+              <span>（协议族 / 模型名 / 上游 base_url / 凭证，并可发起一次真实连通性测试）</span>
+            </div>
           </section>
         </TabsContent>
 

@@ -18,6 +18,28 @@ export interface SseErrorInfo {
   attempt: number;
 }
 
+/**
+ * 平台 SSE 事件名（与后端 `agent/events.py::EVENT_TYPES` 一一对应）。
+ *
+ * 服务端若把事件写成 `event: <type>`（命名事件），浏览器不会走 `onmessage`，
+ * 必须为每个名字注册监听器——见 `connect()` 里的注释。
+ */
+export const PLATFORM_SSE_EVENT_NAMES = [
+  'session.started',
+  'turn.started',
+  'assistant.delta',
+  'thinking.delta',
+  'tool.started',
+  'tool.progress',
+  'tool.finished',
+  'todo.updated',
+  'turn.queued',
+  'turn.finished',
+  'turn.stopped',
+  'turn.failed',
+  'engine.notice',
+] as const;
+
 export interface SseHandle {
   close(): void;
   status(): SseStatus;
@@ -172,14 +194,34 @@ export function openSse(path: string, options: OpenSseOptions): SseHandle {
       onOpen?.();
     };
 
-    source.onmessage = (event: MessageEvent<string>) => {
+    const dispatch = (data: string, eventId: string): void => {
       armHeartbeat();
-      if (event.lastEventId) lastId = event.lastEventId;
-      const envelope = parseEnvelope(event.data);
+      if (eventId) lastId = eventId;
+      const envelope = parseEnvelope(data);
       if (!envelope) return;
       if (envelope.id !== undefined && envelope.id !== null) lastId = String(envelope.id);
       onEvent(envelope);
     };
+
+    source.onmessage = (event: MessageEvent<string>) => {
+      dispatch(event.data, event.lastEventId);
+    };
+
+    /**
+     * 同时订阅平台事件名（`event: turn.started`）。
+     *
+     * SSE 规范：带 `event:` 行的帧不会被派发到 `onmessage`，只触发同名监听器。
+     * 服务端曾经的实现就带这行，于是浏览器一条事件都收不到——UI 面板空白、
+     * 徽标永远「执行中」，而库里这一轮早已 succeeded。服务端已改为只发 `data:`，
+     * 这里再注册一遍，让两种格式都能工作：协议细节不该由「哪一端先改」决定
+     * 系统是否可用。
+     */
+    for (const name of PLATFORM_SSE_EVENT_NAMES) {
+      source.addEventListener(name, (event) => {
+        const message = event as MessageEvent<string>;
+        dispatch(message.data, message.lastEventId);
+      });
+    }
 
     source.onerror = () => {
       // 服务端明确关闭 / 网络错误：EventSource 会自行重试，但无法携带 last_event_id，
