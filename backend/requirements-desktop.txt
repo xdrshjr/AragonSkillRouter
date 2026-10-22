@@ -1,0 +1,9 @@
+# Packaging-only dependencies for the desktop build.
+#
+# These are NOT needed to run the service (see requirements.txt). They exist so a
+# release engineer can freeze the backend into a standalone executable:
+#
+#   python -m pip install -r backend/requirements-desktop.txt
+#   cd desktop && npm run build:backend
+-r requirements.txt
+pyinstaller==6.11.1

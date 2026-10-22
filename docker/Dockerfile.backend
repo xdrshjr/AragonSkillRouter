@@ -1,0 +1,63 @@
+# Skill Router — backend image (FastAPI + SQLite).
+#
+# Two stages so the runtime layer carries no build tooling and no pip cache.
+# The same image runs the API and the worker; only the command differs, which
+# guarantees they always agree about settings and the SQLite schema.
+#
+# Build from the REPOSITORY ROOT:
+#   docker build -f docker/Dockerfile.backend -t skill-router-api:1.0.0 .
+#
+# No secret is baked in: every SR_* value arrives at run time from the
+# environment or an env_file.
+
+# ----------------------------------------------------------------- deps stage --
+FROM python:3.11-slim-bookworm AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /build
+
+# Only the requirements first: this layer is cached until requirements.txt changes.
+COPY backend/requirements.txt ./requirements.txt
+
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip==24.3.1 \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+# -------------------------------------------------------------- runtime stage --
+FROM python:3.11-slim-bookworm AS runtime
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONFAULTHANDLER=1 \
+    SR_DATA_DIR=/data
+
+# A fixed uid/gid keeps volume ownership predictable on the host.
+RUN groupadd --gid 10001 skillrouter \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin skillrouter
+
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+COPY --chown=10001:10001 backend/ /app/
+
+# /data holds the SQLite database, uploads, artifacts, backups and the keyring.
+RUN mkdir -p /data/keys /data/uploads /data/artifacts /data/backups \
+    && chown -R 10001:10001 /data
+
+USER 10001:10001
+
+EXPOSE 8000
+
+# Liveness only (no auth, no database work): /api/health. Readiness is /api/health/ready.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import json,sys,urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=4); sys.exit(0 if json.load(r).get('status')=='ok' else 1)"
+
+# `init` is idempotent: it applies migrations, creates the keyring and the first
+# admin account if they are missing, then uvicorn serves. Behind the bundled nginx
+# (or any proxy) uvicorn is told to trust the forwarded headers, otherwise the
+# platform would build absolute URLs from the container's own host.
+CMD ["sh", "-c", "python -m app.cli init && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*' --no-server-header"]

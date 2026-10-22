@@ -1,0 +1,63 @@
+# Skill Router — frontend image (Next.js 15 App Router, standalone output).
+#
+# `next.config.mjs` sets `output: 'standalone'`, so the runtime layer only needs the
+# standalone server bundle, the static assets and public/ — no dev dependencies,
+# no `next start`, no source.
+#
+# Build from the REPOSITORY ROOT:
+#   docker build -f docker/Dockerfile.frontend \
+#     --build-arg SR_API_ORIGIN=http://api:8000 -t skill-router-web:1.0.0 .
+#
+# SR_API_ORIGIN is baked in at BUILD time because `rewrites()` is evaluated then:
+# server-side rendering proxies /api to the backend through it. (Browser traffic
+# normally reaches /api through nginx, which proxies to the API directly.)
+
+# --------------------------------------------------------------- deps stage ----
+FROM node:22-bookworm-slim AS deps
+
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+# ------------------------------------------------------------- build stage ----
+FROM node:22-bookworm-slim AS builder
+
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NODE_ENV=production
+
+ARG SR_API_ORIGIN=http://api:8000
+ENV SR_API_ORIGIN=${SR_API_ORIGIN}
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY frontend/ ./
+
+RUN npm run build
+
+# ----------------------------------------------------------- runtime stage ----
+FROM node:22-bookworm-slim AS runtime
+
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+RUN groupadd --gid 10002 nextjs \
+    && useradd --uid 10002 --gid 10002 --no-create-home --shell /usr/sbin/nologin nextjs
+
+# The standalone bundle brings its own minimal node_modules.
+COPY --from=builder --chown=10002:10002 /app/.next/standalone ./
+COPY --from=builder --chown=10002:10002 /app/.next/static ./.next/static
+COPY --from=builder --chown=10002:10002 /app/public ./public
+
+USER 10002:10002
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:3000/login').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "server.js"]

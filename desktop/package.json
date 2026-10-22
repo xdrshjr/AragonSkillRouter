@@ -1,0 +1,83 @@
+{
+  "name": "skill-router-desktop",
+  "productName": "Skill Router",
+  "version": "1.0.0",
+  "description": "Skill Router desktop — credential management, capability routing and SKILL distribution, running locally.",
+  "license": "MIT",
+  "author": {
+    "name": "Skill Router"
+  },
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "build:main": "tsc -p tsconfig.json",
+    "build:backend": "node scripts/build-backend.mjs",
+    "build": "npm run build:main && npm run build:web && npm run build:backend",
+    "start": "npm run build:main && electron .",
+    "dev": "npm run build:main && cross-env SR_DESKTOP_DEV_RENDERER=http://localhost:3000 electron .",
+    "pack": "npm run build && electron-builder --win --dir",
+    "dist": "npm run build && electron-builder --win",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3",
+    "build:web": "node scripts/build-web.mjs"
+  },
+  "dependencies": {
+    "electron-log": "5.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "cross-env": "7.0.3",
+    "electron": "33.4.11",
+    "electron-builder": "25.1.8",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
+  },
+  "build": {
+    "appId": "ai.skillrouter.desktop",
+    "productName": "Skill Router",
+    "copyright": "Copyright © 2026 Skill Router",
+    "directories": {
+      "output": "../dist-desktop",
+      "buildResources": "resources"
+    },
+    "files": [
+      "dist/**/*",
+      "resources/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "resources/icon.ico",
+      "artifactName": "SkillRouter-Setup-${version}.${ext}",
+      "publisherName": "Skill Router"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Skill Router",
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": null
+  }
+}

@@ -1,0 +1,67 @@
+# Skill Router — AragonAgent sidecar image.
+#
+# This is the only process that imports @aragon-agent/core (see docs/CONTRACT.md §10).
+#
+# IMPORTANT (read before deploying): `sidecar/src/config.ts` refuses to start unless
+# SR_ARAGON_SIDECAR_HOST is a loopback address (127.0.0.1 / localhost / ::1). A
+# container that binds 127.0.0.1 is not reachable from another container, so the
+# sidecar cannot be a plain peer service on the compose network. docker-compose.yml
+# therefore attaches it with `network_mode: "service:api"`, which shares the API
+# container's network namespace: the sidecar binds 127.0.0.1:7317 inside it and the
+# API reaches it at http://127.0.0.1:7317. Do not expose port 7317 to the host.
+#
+# Build from the REPOSITORY ROOT:
+#   docker build -f docker/Dockerfile.sidecar -t skill-router-sidecar:1.0.0 .
+
+# --------------------------------------------------------------- deps stage ----
+FROM node:22-bookworm-slim AS deps
+
+WORKDIR /app
+# `npm ci` needs registry access for @aragon-agent/core (the engine is a real npm
+# dependency, not vendored). Build with network access or a local npm mirror.
+COPY sidecar/package.json sidecar/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+# -------------------------------------------------------------- build stage ----
+FROM node:22-bookworm-slim AS builder
+
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY sidecar/ ./
+RUN npm run build
+
+# -------------------------------------------------------- production deps -----
+FROM node:22-bookworm-slim AS prod-deps
+
+WORKDIR /app
+COPY sidecar/package.json sidecar/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+
+# ----------------------------------------------------------- runtime stage ----
+FROM node:22-bookworm-slim AS runtime
+
+WORKDIR /app
+ENV NODE_ENV=production \
+    SR_ARAGON_SIDECAR_HOST=127.0.0.1 \
+    SR_ARAGON_SIDECAR_PORT=7317
+
+RUN groupadd --gid 10003 sidecar \
+    && useradd --uid 10003 --gid 10003 --no-create-home --shell /usr/sbin/nologin sidecar
+
+COPY --from=prod-deps --chown=10003:10003 /app/node_modules ./node_modules
+COPY --from=builder --chown=10003:10003 /app/dist ./dist
+COPY --chown=10003:10003 sidecar/package.json ./package.json
+
+USER 10003:10003
+
+# Declared for documentation only: with network_mode service:api, compose cannot
+# publish this port. Reach it from inside the API container.
+EXPOSE 7317
+
+# /health is the one unauthenticated route; it never reports the bearer token.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:7317/health').then((r)=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"
+
+# No secret in the image: SR_ARAGON_SIDECAR_TOKEN must be supplied at run time
+# (the process exits with a clear message if it is missing).
+CMD ["node", "dist/main.js"]

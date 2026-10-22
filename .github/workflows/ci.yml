@@ -1,0 +1,218 @@
+# Skill Router — continuous integration.
+#
+# Five jobs, each proving one thing that a hand-written README cannot:
+#   backend     the FastAPI app compiles and its test suite passes
+#   migrations  a fresh database migrates from zero (the container's first boot)
+#   frontend    lint + typecheck + the production build next.config.mjs defines
+#   sidecar     the engine wrapper builds and its node:test suite passes
+#   installer   the npm package's tests pass and `npm pack` produces a tarball
+#
+# Nothing here needs a provider credential: the backend tests use a fake upstream
+# (see backend/tests/test_execution.py). Checks that DO need credentials are listed
+# in docs/VERIFICATION.md and are not part of CI on purpose.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  backend:
+    name: backend (compile + pytest)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Byte-compile the application
+        run: python -m compileall -q backend/app
+
+      - name: Run the backend test suite
+        working-directory: backend
+        env:
+          SR_ENVIRONMENT: test
+        run: python -m pytest tests -q
+
+  migrations:
+    name: migrations (fresh database)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Apply every migration to an empty database
+        working-directory: backend
+        env:
+          SR_ENVIRONMENT: test
+          SR_DATA_DIR: ${{ runner.temp }}/sr-data
+          SR_DATABASE_PATH: ${{ runner.temp }}/sr-data/fresh.db
+          SR_MASTER_KEY_FILE: ${{ runner.temp }}/sr-data/keys/master.keyring.json
+        run: |
+          mkdir -p "$SR_DATA_DIR/keys"
+          python -c "from app.core.db import apply_migrations; print(apply_migrations())"
+
+      - name: The migrated database reports the expected tables
+        working-directory: backend
+        env:
+          SR_ENVIRONMENT: test
+          SR_DATA_DIR: ${{ runner.temp }}/sr-data
+          SR_DATABASE_PATH: ${{ runner.temp }}/sr-data/fresh.db
+          SR_MASTER_KEY_FILE: ${{ runner.temp }}/sr-data/keys/master.keyring.json
+        run: |
+          python - <<'PY'
+          import sqlite3, os, sys
+          path = os.environ["SR_DATABASE_PATH"]
+          with sqlite3.connect(path) as conn:
+              names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+              applied = [row[0] for row in conn.execute("SELECT name FROM schema_migrations ORDER BY version")]
+          required = {"schema_migrations", "settings", "users", "sessions", "login_attempts",
+                      "providers", "credentials", "capabilities", "capability_versions",
+                      "capability_tests", "routes", "invocations", "tasks", "jobs", "agents",
+                      "agent_tokens", "budget_policies", "skills", "skill_versions",
+                      "skill_imports", "files", "agent_sessions", "agent_messages",
+                      "agent_runs", "agent_events", "engine_releases", "audit_logs"}
+          missing = sorted(required - names)
+          print("applied:", applied)
+          print("missing:", missing)
+          sys.exit(1 if missing else 0)
+          PY
+
+  frontend:
+    name: frontend (lint + typecheck + build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Build (standalone output, the same mode the image uses)
+        working-directory: frontend
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          SR_API_ORIGIN: http://127.0.0.1:8000
+        run: npm run build
+
+  sidecar:
+    name: sidecar (build + node:test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: sidecar/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sidecar
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        working-directory: sidecar
+        run: npm run build
+
+      - name: Test
+        working-directory: sidecar
+        run: node --test "test/*.test.mjs"
+
+  installer:
+    name: installer (node:test + npm pack)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: packages/installer/package-lock.json
+
+      - name: Install dependencies (the package has none, but CI must be reproducible)
+        working-directory: packages/installer
+        run: npm ci --no-audit --no-fund
+
+      - name: Syntax check the launcher
+        working-directory: packages/installer
+        run: node --check bin/skill-router-connect.js
+
+      - name: Run the installer tests against the mock platform
+        working-directory: packages/installer
+        run: node --test "test/*.test.js"
+
+      - name: Pack the distributable tarball
+        id: pack
+        working-directory: packages/installer
+        run: |
+          npm pack
+          BUNDLE=$(ls -1 skill-router-connect-*.tgz)
+          sha256sum "$BUNDLE" | tee "$BUNDLE.sha256"
+
+      - name: Install the tarball in a clean directory and run the CLI
+        working-directory: packages/installer
+        run: |
+          BUNDLE=$(ls -1 skill-router-connect-*.tgz)
+          TARGET=$(mktemp -d)
+          cd "$TARGET"
+          printf '{"name":"pack-check","private":true,"version":"1.0.0"}\n' > package.json
+          npm install --no-audit --no-fund "$GITHUB_WORKSPACE/packages/installer/$BUNDLE"
+          ./node_modules/.bin/skill-router-connect --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skill-router-connect-tarball
+          path: |
+            packages/installer/skill-router-connect-*.tgz
+            packages/installer/skill-router-connect-*.tgz.sha256
+          if-no-files-found: error
+          retention-days: 30

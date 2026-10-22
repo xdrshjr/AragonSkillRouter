@@ -1,0 +1,59 @@
+# Skill Router — Docker build context exclusions.
+#
+# The backend/frontend/sidecar images build from the repository ROOT
+# (`context: ..` in docker-compose.yml), so this file is what keeps node_modules,
+# the virtualenv, the SQLite database and every secret out of the build context and
+# out of the image layers.
+
+# ---------------------------------------------------------------- secrets ------
+.env
+.env.*
+!.env.example
+**/.env
+**/master.keyring.json
+**/*.keyring.json
+**/keys/
+**/.skill-router.json
+*.pem
+*.key
+
+# ------------------------------------------------------------- dependencies ----
+**/node_modules
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# ------------------------------------------------------------ build output ----
+**/.next
+**/out
+**/dist
+packages/installer/*.tgz
+**/*.tsbuildinfo
+**/next-env.d.ts
+
+# ------------------------------------------------------- runtime data ---------
+data/
+**/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ------------------------------------------------------------------ misc ------
+.git
+.gitignore
+.github
+node_modules
+docs/
+scripts/
+*.log
+.DS_Store
+Thumbs.db
+
+# The installer package is shipped as a tarball, not baked into a service image.
+packages/

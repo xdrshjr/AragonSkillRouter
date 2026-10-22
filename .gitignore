@@ -1,0 +1,104 @@
+# Skill Router — repository ignore rules.
+# Anything that can hold a secret, or that a build regenerates, is ignored.
+# If you think a file should be committed and it is listed here: fix the rule, do
+# not commit with --force.
+
+# ---------------------------------------------------------------- secrets ------
+# The deployment environment. `.env.example` is the template and IS committed.
+.env
+.env.*
+!.env.example
+backend/.env
+sidecar/.env
+*.keyring.json
+master.keyring.json
+keys/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+# The npm installer's connection config holds an agent token in plaintext.
+.skill-router.json
+
+# ------------------------------------------------------------- python ---------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# ----------------------------------------------------------------- node -------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.npmpack/
+# NOTE: packages/installer/*.tgz is deliberately NOT ignored. `docs/CONTRACT.md` §11
+# requires the package to ship a local tarball until it is published on npm. Re-create
+# it with `npm pack` after changing the installer (the file name carries the version).
+
+# --------------------------------------------------------------- next.js ------
+.next/
+out/
+next-env.d.ts
+.turbo/
+.vercel/
+*.tsbuildinfo
+
+# ------------------------------------------------------- runtime data ---------
+# The SQLite database, uploads, artifacts, backups and the keyring live here in a
+# local (non-Docker) deployment. None of it belongs in git.
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+# Local agent installs produced by packages/installer during development. A real
+# agent project that consumes this repo may want to commit its own SKILL.md — these
+# two rules are scoped to the paths the installer writes in *this* tree.
+.claude/skills/skill-router/
+/.skill-router.json
+/skill-router-install-test/
+
+# ------------------------------------------------------------------ os --------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# ------------------------------------------------------------------ logs ------
+*.log
+logs/
+
+
+# ------------------------------------------------- desktop (Electron) ---------
+# Installed output of desktop/: the electron-builder artifacts, the PyInstaller
+# work tree, and the assembled runtime payload (rebuilt by `npm run build`).
+dist-desktop/
+desktop/build/
+desktop/dist/
+desktop/resources/runtime/
+desktop/node_modules/
+# Per-step output from build-desktop.ps1 (kept on disk so a failure can be read).
+build-logs/
+
+# -------------------------------------------------------------- scratch -------
+# Verification output written by scripts/smoke.ps1.
+scripts/.smoke-out/
+tmp/
+scratch/

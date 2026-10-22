@@ -1,0 +1,30 @@
+{
+  "name": "skill-router-connect",
+  "version": "1.0.0",
+  "description": "Install, verify, refresh and remove a Skill Router connection SKILL for an external agent (Claude Code, Codex, generic).",
+  "keywords": [
+    "skill-router",
+    "skill",
+    "mcp",
+    "agent"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "skill-router-connect": "bin/skill-router-connect.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --check bin/skill-router-connect.js && node --test \"test/*.test.js\"",
+    "pack:local": "npm pack"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

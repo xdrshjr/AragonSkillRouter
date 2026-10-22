@@ -1,0 +1,166 @@
+# Skill Router — Docker Compose (single host, SQLite on a named volume).
+#
+# Run from this directory:
+#   copy ..\.env.example ..\.env      (Windows; then edit it)
+#   docker compose --env-file ../.env up -d --build
+#   docker compose ps
+#   curl http://localhost:8080/api/health
+#
+# There is no literal secret in this file. Everything is either read from ../.env
+# (env_file) or substituted from the process environment at parse time (the
+# dollar-brace placeholders below). Values that are NOT secrets keep a default so
+# `docker compose config` works with an empty environment.
+#
+# Services:
+#   api      FastAPI on 8000 (migrations + first-run bootstrap, then uvicorn)
+#   worker   the same image running `python -m app.worker_main`
+#   web      Next.js standalone server on 3000
+#   sidecar  AragonAgent engine on 127.0.0.1:7317, sharing the api network namespace
+#   edge     nginx reverse proxy: serves web, proxies /api (SSE-safe)
+#
+# Validate without starting anything:
+#   docker compose config --quiet
+
+name: skill-router
+
+services:
+  api:
+    image: skill-router-api:${SR_IMAGE_TAG:-1.0.0}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    env_file:
+      - ../.env
+    environment:
+      # Compose overrides only what must differ inside the network.
+      SR_DATA_DIR: /data
+      SR_BACKEND_BASE_URL: http://api:8000
+      # The sidecar shares this container's network namespace (see the sidecar
+      # service); this is why loopback works here.
+      SR_ARAGON_SIDECAR_URL: http://127.0.0.1:7317
+    volumes:
+      - sr-data:/data
+    ports:
+      # Bound to loopback: public traffic goes through `edge`, which supplies
+      # HTTPS and the security headers. Remove this mapping if you do not want a
+      # direct port at all (the CLI on the host then talks to edge instead).
+      - "127.0.0.1:${SR_API_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import json,sys,urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready',timeout=4); sys.exit(0 if json.load(r).get('status')=='ready' else 1)
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 40s
+    stop_grace_period: 30s
+
+  worker:
+    image: skill-router-api:${SR_IMAGE_TAG:-1.0.0}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    command: ["python", "-m", "app.worker_main"]
+    env_file:
+      - ../.env
+    # The sidecar binds loopback inside the api container's network namespace, so
+    # a worker with its own namespace could not reach it. Agent runs execute in
+    # the API process today; sharing the namespace keeps the two consistent if a
+    # job kind needs the engine later.
+    network_mode: "service:api"
+    environment:
+      SR_DATA_DIR: /data
+      SR_BACKEND_BASE_URL: http://api:8000
+      SR_ARAGON_SIDECAR_URL: http://127.0.0.1:7317
+    volumes:
+      - sr-data:/data
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # The worker has no HTTP surface: prove the process is alive and the
+      # database it shares with the API is readable.
+      test:
+        - CMD
+        - python
+        - -c
+        - from app.core import db; db.query_scalar('SELECT 1')
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 40s
+
+  web:
+    image: skill-router-web:${SR_IMAGE_TAG:-1.0.0}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        # Baked in at build time: `next.config.mjs` rewrites /api here for SSR.
+        SR_API_ORIGIN: http://api:8000
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+  sidecar:
+    image: skill-router-sidecar:${SR_IMAGE_TAG:-1.0.0}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.sidecar
+    env_file:
+      - ../.env
+    environment:
+      # `sidecar/src/config.ts` refuses any non-loopback bind, so the sidecar shares
+      # the api container's network namespace instead of being a peer service.
+      SR_ARAGON_SIDECAR_HOST: 127.0.0.1
+      SR_ARAGON_SIDECAR_PORT: "7317"
+    network_mode: "service:api"
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      # Runs inside the shared namespace, so loopback is the right address.
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:7317/health').then((r)=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  edge:
+    image: nginx:1.27-bookworm
+    depends_on:
+      - web
+      - api
+    ports:
+      - "${SR_EDGE_PORT:-8080}:8080"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  # SQLite database, uploads, artifacts, backups and the master keyring all live
+  # under /data. Back this up (scripts/backup.ps1) - a database restore is useless
+  # without the matching keyring.
+  sr-data:
+    name: ${SR_DATA_VOLUME:-skillrouter-data}
